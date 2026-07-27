@@ -422,6 +422,7 @@ def _filter_semantic(
             out.append(tok.text)
             continue
         if _is_number(tok.text):
+            out.append(tok.text)
             continue
         if tok.text.lower() in fw:
             continue
@@ -447,26 +448,38 @@ def _filter_aggressive(
     group = _lang_group(iso3)
     is_proper = _detect_proper_nouns(tokens, iso3, proper_nouns)
     out = []
+
     for i, tok in enumerate(tokens):
         if tok.is_punct:
             continue
+
         if is_proper[i]:
             out.append(tok.text)
             continue
+
+        if _is_number(tok.text):
+            out.append(tok.text)
+            continue
+
         if len(tok.text) <= 1 and not tok.text[0:1].isalpha():
             continue
-        if _is_number(tok.text):
-            continue
+
         lower = tok.text.lower()
+
         if lower in fw:
             continue
+
         normalized = _lemma_or_lower(tok.text, lemmas, pos_tags)
+
         if len(normalized) <= 1:
             continue
+
         if normalized in fw or normalized in generic:
             continue
+
         if _is_descriptive(normalized, group):
             continue
+
         out.append(normalized)
 
     # Ported from Caveman C# 1.4.1: a short, content-bearing prompt (e.g. a one-word
@@ -513,77 +526,128 @@ def _filter_statistical(
     n = len(tokens)
     sentence_of, sentence_count = _sentence_index_of(tokens)
 
-    # Scoring key per token: None for punctuation/proper nouns/numbers (handled
-    # separately, never scored away), otherwise its lemma/lowercased surface form.
+    # Scoring key per token: None for punctuation/proper nouns/numbers.
+    # These values are handled separately and never scored away.
     keys: list[str | None] = [None] * n
+
     for i, tok in enumerate(tokens):
         if tok.is_punct or is_proper[i] or _is_number(tok.text):
             continue
+
         keys[i] = _lemma_or_lower(tok.text, lemmas, pos_tags)
 
     term_freq: dict[str, int] = {}
     docs_with_term: dict[str, set[int]] = {}
-    for i, k in enumerate(keys):
-        if k is None:
+
+    for i, key in enumerate(keys):
+        if key is None:
             continue
-        term_freq[k] = term_freq.get(k, 0) + 1
-        docs_with_term.setdefault(k, set()).add(sentence_of[i])
+
+        term_freq[key] = term_freq.get(key, 0) + 1
+        docs_with_term.setdefault(key, set()).add(sentence_of[i])
 
     scores: dict[str, float] = {}
-    for word, freq in term_freq.items():
+
+    for word, frequency in term_freq.items():
         if word in fw or word in generic:
             scores[word] = 0.0
             continue
-        df = len(docs_with_term[word])
-        idf = (math.log(sentence_count / (1 + df)) + 1.0) if sentence_count > 1 else 1.0
-        scores[word] = freq * idf
+
+        document_frequency = len(docs_with_term[word])
+        idf = (
+            math.log(sentence_count / (1 + document_frequency)) + 1.0
+            if sentence_count > 1
+            else 1.0
+        )
+        scores[word] = frequency * idf
 
     if not scores:
-        return [t.text for t in tokens if not t.is_punct and not _is_number(t.text)]
+        return [tok.text for tok in tokens if not tok.is_punct]
 
-    positive = sorted(v for v in scores.values() if v > 0)
-    threshold = positive[len(positive) // 2] if positive else 0
+    positive_scores = sorted(
+        score for score in scores.values() if score > 0
+    )
+    threshold = (
+        positive_scores[len(positive_scores) // 2]
+        if positive_scores
+        else 0
+    )
 
     keep = [False] * n
     sentence_has_keep = [False] * sentence_count
+
     for i, tok in enumerate(tokens):
         if tok.is_punct:
             continue
+
         if is_proper[i]:
             keep[i] = True
             sentence_has_keep[sentence_of[i]] = True
             continue
-        k = keys[i]
-        if k is None:
+
+        if _is_number(tok.text):
+            keep[i] = True
+            sentence_has_keep[sentence_of[i]] = True
             continue
-        score = scores.get(k, 0)
+
+        key = keys[i]
+
+        if key is None:
+            continue
+
+        score = scores.get(key, 0)
+
         if score > 0 and score >= threshold:
             keep[i] = True
             sentence_has_keep[sentence_of[i]] = True
 
-    # Safety floor: a sentence that scored nothing above threshold still keeps its
-    # single highest-scoring word, so compression never erases a whole sentence.
-    for s in range(sentence_count):
-        if sentence_has_keep[s]:
+    # Safety floor: a sentence that scored nothing above threshold still keeps
+    # its single highest-scoring word.
+    for sentence_index in range(sentence_count):
+        if sentence_has_keep[sentence_index]:
             continue
-        best_idx, best_score = -1, -1.0
-        for i, tok in enumerate(tokens):
-            if sentence_of[i] != s or tok.is_punct or is_proper[i]:
-                continue
-            k = keys[i]
-            if k is None:
-                continue
-            sc = scores.get(k, 0)
-            if sc > best_score:
-                best_score, best_idx = sc, i
-        if best_idx >= 0:
-            keep[best_idx] = True
 
-    out = []
+        best_index = -1
+        best_score = -1.0
+
+        for i, tok in enumerate(tokens):
+            if (
+                sentence_of[i] != sentence_index
+                or tok.is_punct
+                or is_proper[i]
+                or _is_number(tok.text)
+            ):
+                continue
+
+            key = keys[i]
+
+            if key is None:
+                continue
+
+            score = scores.get(key, 0)
+
+            if score > best_score:
+                best_score = score
+                best_index = i
+
+        if best_index >= 0:
+            keep[best_index] = True
+
+    out: list[str] = []
+
     for i, tok in enumerate(tokens):
         if not keep[i]:
             continue
-        out.append(tok.text if is_proper[i] else keys[i])
+
+        if is_proper[i] or _is_number(tok.text):
+            out.append(tok.text)
+            continue
+
+        key = keys[i]
+
+        if key is not None:
+            out.append(key)
+
     return out
 
 
@@ -621,18 +685,26 @@ def _filter_syntactic(
     def next_survives(j: int) -> bool:
         if j >= n or tokens[j].is_punct:
             return False
+
         if is_proper[j]:
             return True
+
         if _is_number(tokens[j].text):
-            return False
+            return True
+
         j_lower = tokens[j].text.lower()
+
         if j_lower in fw:
             return False
+
         j_norm = _lemma_or_lower(tokens[j].text, lemmas, pos_tags)
+
         if j_norm in fw or j_norm in generic:
             return False
+
         if _is_descriptive(j_norm, group):
             return False
+
         return True
 
     def is_glue_or_modifier(i: int) -> bool:
@@ -683,10 +755,13 @@ def _filter_syntactic(
     for i, tok in enumerate(tokens):
         if tok.is_punct or elided[i]:
             continue
+
         if is_proper[i]:
             keep[i] = True
             continue
+
         if _is_number(tok.text):
+            keep[i] = True
             continue
 
         lower = tok.text.lower()
@@ -699,6 +774,7 @@ def _filter_syntactic(
 
         if normalized in generic:
             continue
+
         if _is_descriptive(normalized, group):
             continue
 
