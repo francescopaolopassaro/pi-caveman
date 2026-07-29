@@ -8,6 +8,13 @@ All notable changes to Synthelion are documented here.
 
 ---
 
+## [1.4.5] - 2026-07-29
+
+### Fixed
+- **Numeric values preserved across compression levels** — ports, amounts, percentages, versions, dates and temperatures were being discarded during semantic, aggressive, statistical and syntactic filtering. Numeric tokens are now always retained regardless of compression level.
+
+---
+
 ## [1.2.4] — 2026-07-22
 
 ### Added — local privacy/compression proxy
