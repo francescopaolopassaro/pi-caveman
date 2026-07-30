@@ -112,3 +112,24 @@ class TestAllLevelsNeverExpandTokenCount:
             assert r.compressed_tokens <= r.original_tokens, (
                 f"{level} expanded {text!r} from {r.original_tokens} to {r.compressed_tokens} tokens"
             )
+
+class TestNumericFactsSurvive:
+    @pytest.mark.parametrize("level", ALL_LEVELS)
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("Il server risponde sulla porta 8080.", "8080"),
+            ("La fattura ammonta a 5000 euro.", "5000"),
+            ("Lo sconto applicato è del 25%.", "25"),
+            ("La versione installata è la 3.11.4.", "3"),
+            ("La scadenza è fissata al 12/08/2026.", "12"),
+            ("La temperatura rilevata è -12,5 gradi.", "12"),
+        ],
+    )
+    def test_numeric_value_survives(self, svc, level, text, expected):
+        result = svc.apply_compression(text, "ita", level)
+
+        assert expected in result.compressed_text, (
+            f"{level} removed numeric fact {expected!r}: "
+            f"{result.compressed_text!r}"
+        )
