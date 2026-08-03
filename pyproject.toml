@@ -31,6 +31,7 @@ dependencies = [
     "regex>=2024.1",
     "mcp>=1.0",
     "pyyaml>=6.0",
+    "sqlparse>=0.5",
 ]
 
 [project.urls]

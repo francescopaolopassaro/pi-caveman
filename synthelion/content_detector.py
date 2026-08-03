@@ -16,6 +16,22 @@ _GREP_RESULT = re.compile(r"^[A-Za-z0-9_./@\-\\][^:\n]*:\d+:\S", re.MULTILINE)
 _HTML_MARKERS = ("<html", "<!doctype", "<body", "<div", "<p>")
 _CODE_INDICATORS = ("{", "}", ";", "=>", "->", "def ", "function ", "class ", "import ", "#include", "public ", "private ")
 
+# SQL: statement keyword + companion clause. Leading-statement (or multi-stmt
+# scripts) avoids false positives on prose like "please select from … where …".
+_SQL_STATEMENT = re.compile(
+    r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|WITH|MERGE)\b",
+    re.IGNORECASE,
+)
+_SQL_CLAUSE = re.compile(
+    r"\b(FROM|INTO|SET|VALUES|WHERE|JOIN|GROUP\s+BY|ORDER\s+BY)\b",
+    re.IGNORECASE,
+)
+_SQL_LEADING = re.compile(
+    r"^\s*(?:(?:--[^\n]*\n)|(?:/\*.*?\*/)\s*)*"
+    r"(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|WITH|MERGE)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 class ContentDetector:
     """Classifies content type using purely structural/lexical heuristics.
@@ -72,9 +88,28 @@ class ContentDetector:
         if content.count("|") > 4 and any(l.startswith("|") for l in lines[:5]):
             return ContentDetectionResult(ContentType.TABULAR, 0.75)
 
-        # 8 — Code (structural indicators)
+        # 8 — SQL (before CODE: SQL's `;` would otherwise inflate code_score)
+        if _looks_like_sql(content):
+            return ContentDetectionResult(ContentType.SQL, 0.85)
+
+        # 9 — Code (structural indicators)
         code_score = sum(1 for ind in _CODE_INDICATORS if ind in content)
         if code_score >= 3:
             return ContentDetectionResult(ContentType.CODE, 0.70)
 
         return ContentDetectionResult(ContentType.PLAIN_TEXT, 1.0)
+
+
+def _looks_like_sql(content: str) -> bool:
+    """Require a statement keyword + companion clause, plus a shape signal.
+
+    Shape = leading statement keyword (after optional comments), or at least two
+    statement keywords (multi-statement scripts / dumps).
+    """
+    stmt_hits = len(_SQL_STATEMENT.findall(content))
+    clause_hits = len(_SQL_CLAUSE.findall(content))
+    if stmt_hits < 1 or clause_hits < 1:
+        return False
+    if _SQL_LEADING.search(content):
+        return True
+    return stmt_hits >= 2 and clause_hits >= 2

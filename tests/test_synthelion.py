@@ -19,6 +19,7 @@ from synthelion.compressors.json_crusher import JsonCrusher
 from synthelion.compressors.html_extractor import HtmlExtractor
 from synthelion.compressors.diff_compressor import DiffCompressor
 from synthelion.compressors.log_compressor import LogCompressor
+from synthelion.compressors.sql_compressor import SqlCompressor
 from synthelion.nlp.summarizer import TfIdfSummarizer
 from synthelion.nlp.text_rank import TextRankSummarizer
 from synthelion.agent.context_window import ContextWindow
@@ -296,6 +297,22 @@ class TestContentDetector:
         r = self.det.detect("<html><body><p>Hello world</p></body></html>")
         assert r.type == ContentType.HTML
 
+    def test_detect_sql(self):
+        sql = "SELECT id, name\nFROM users\nWHERE country = 'US'"
+        r = self.det.detect(sql)
+        assert r.type == ContentType.SQL
+        assert r.confidence >= 0.8
+
+    def test_detect_sql_with_leading_comment(self):
+        sql = "-- fetch active users\nSELECT * FROM users WHERE active = 1"
+        r = self.det.detect(sql)
+        assert r.type == ContentType.SQL
+
+    def test_detect_prose_with_select_from_where_is_not_sql(self):
+        prose = "Please select from the following options where you want to go next."
+        r = self.det.detect(prose)
+        assert r.type != ContentType.SQL
+
     def test_detect_plain_text(self):
         r = self.det.detect("This is a simple sentence about nothing special.")
         assert r.type == ContentType.PLAIN_TEXT
@@ -328,6 +345,15 @@ class TestContentRouter:
         router = ContentRouter()
         r = router.route(diff)
         assert r.detected_type == ContentType.GIT_DIFF
+
+    def test_route_sql(self):
+        sql = "SELECT\n  id,\n  name\nFROM users\nWHERE active = 1"
+        router = ContentRouter()
+        r = router.route(sql)
+        assert r.detected_type == ContentType.SQL
+        assert r.strategy_used == "SqlCompression"
+        assert "FROM users" in r.compressed
+        assert "\n  " not in r.compressed  # indentation collapsed
 
     # ── universal anti-expansion guard ───────────────────────────────────────
 
@@ -1458,6 +1484,69 @@ class TestCompressorEdgeCases:
         lc = LogCompressor()
         result, was = lc.compress(log)
         assert not was  # all unique, nothing deduplicated
+
+    def test_sql_compressor_empty(self):
+        sc = SqlCompressor()
+        result, was = sc.compress("")
+        assert result == ""
+        assert not was
+
+    def test_sql_compressor_collapses_whitespace(self):
+        sql = "SELECT\n  id,\n  name\nFROM users\nWHERE active = 1"
+        sc = SqlCompressor()
+        result, was = sc.compress(sql)
+        assert was
+        assert "FROM users" in result
+        assert "WHERE active = 1" in result
+        assert "\n  " not in result
+
+    def test_sql_compressor_preserves_string_literal_whitespace(self):
+        sql = "SELECT * FROM t WHERE note = 'keep  these   spaces'"
+        sc = SqlCompressor()
+        result, was = sc.compress(sql)
+        assert "keep  these   spaces" in result
+
+    def test_sql_compressor_keeps_comments_by_default(self):
+        sql = "SELECT id FROM users; -- important filter"
+        sc = SqlCompressor()
+        result, _ = sc.compress(sql)
+        assert "important filter" in result
+
+    def test_sql_compressor_strip_comments(self):
+        sql = "SELECT id FROM users; -- drop me"
+        sc = SqlCompressor()
+        result, _ = sc.compress(sql, strip_comments=True)
+        assert "drop me" not in result
+        assert "SELECT id FROM users" in result
+
+    def test_sql_compressor_trailing_line_comment_does_not_eat_next_clause(self):
+        # Collapsing newlines after `--` must not comment out the rest of the query.
+        sql = "SELECT id\n-- only this line is a comment\nFROM users"
+        sc = SqlCompressor()
+        result, was = sc.compress(sql)
+        assert was
+        assert "FROM users" in result
+        # FROM must remain executable SQL, not absorbed into the `--` comment line.
+        for line in result.splitlines():
+            if line.lstrip().startswith("--"):
+                assert "FROM users" not in line
+
+    def test_sql_compressor_fold_values_off_by_default(self):
+        sql = "INSERT INTO t (a) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)"
+        sc = SqlCompressor()
+        result, _ = sc.compress(sql)
+        assert "(10)" in result
+        assert "CCR:" not in result
+
+    def test_sql_compressor_fold_values_with_ccr(self):
+        sql = "INSERT INTO t (a) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10)"
+        sc = SqlCompressor()
+        result, was = sc.compress(sql, fold_values=True, max_values=3)
+        assert was
+        assert "(1)" in result and "(2)" in result and "(3)" in result
+        assert "(10)" not in result
+        assert "CCR:" in result
+        assert "7 value tuples dropped" in result
 
 
 # ---------------------------------------------------------------------------

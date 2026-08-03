@@ -11,6 +11,7 @@ from synthelion.compressors.diff_compressor import DiffCompressor
 from synthelion.compressors.html_extractor import HtmlExtractor
 from synthelion.compressors.json_crusher import JsonCrusher
 from synthelion.compressors.log_compressor import LogCompressor
+from synthelion.compressors.sql_compressor import SqlCompressor
 from synthelion.compressors.tabular import TabularCompressor
 from synthelion.content_detector import ContentDetector
 from synthelion.core import CompressionService
@@ -90,6 +91,7 @@ class ContentRouter:
         self._diff = DiffCompressor()
         self._log = LogCompressor()
         self._code = CodeCompressor()
+        self._sql = SqlCompressor()
         self._table = TabularCompressor()
         self._cache: dict[str, tuple[RoutedCompressionResult, float]] = {}
         self._cache_lock = Lock()
@@ -242,6 +244,14 @@ class ContentRouter:
             return RoutedCompressionResult(
                 compressed=compressed, original=content,
                 detected_type=ct, strategy_used=f"CodeCompression:{lang}",
+                tokens_before=tb, tokens_after=_approx_tokens(compressed),
+            )
+
+        if ct == ContentType.SQL:
+            compressed, _ = self._sql.compress(content)
+            return RoutedCompressionResult(
+                compressed=compressed, original=content,
+                detected_type=ct, strategy_used="SqlCompression",
                 tokens_before=tb, tokens_after=_approx_tokens(compressed),
             )
 

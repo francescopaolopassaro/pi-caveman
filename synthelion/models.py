@@ -26,6 +26,7 @@ class ContentType(Enum):
     HTML = "Html"
     SEARCH_RESULTS = "SearchResults"
     TABULAR = "Tabular"
+    SQL = "Sql"
 
 
 class CompressionProfile(Enum):
