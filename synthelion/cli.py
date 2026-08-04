@@ -159,6 +159,15 @@ def main() -> None:
     p_loopreset = sub.add_parser("loop-reset", help="Clear loop-guard call history for a session")
     p_loopreset.add_argument("--session", "-s", default="default", help="Session/agent id (default: 'default')")
 
+    # firewall-check — EnterpriseGuard pre-tool guardrail (blocked file paths + secret-shaped content)
+    p_fwck = sub.add_parser(
+        "firewall-check",
+        help="Pre-tool EnterpriseGuard check: block a tool call that would read a protected file or leak credentials",
+    )
+    p_fwck.add_argument("--tool", "-t", required=True, help="Name of the tool about to be called")
+    p_fwck.add_argument("--args", "-a", help="JSON object of the arguments that would be passed to it")
+    p_fwck.add_argument("--json", action="store_true", help="Output as JSON")
+
     # cluster — multi-node master/slave management
     p_cluster = sub.add_parser("cluster", help="Multi-node cluster management (master/slave)")
     cluster_sub = p_cluster.add_subparsers(dest="cluster_cmd", required=True)
@@ -211,6 +220,13 @@ def main() -> None:
     p_wiki.add_argument("--max-file-size", type=int, default=100 * 1024, help="Max file size in bytes (default: 100KB)")
     p_wiki.add_argument("--depth", type=int, choices=[1, 2, 3, 4], default=None, help="Detail level 1-4. Default: configured value (see `synthelion configure --show`), normally 2. 4 adds short code excerpts.")
 
+    # mask-document — PII masking for PDF/Word/Excel/CSV/Markdown/plain-text files
+    p_mask = sub.add_parser("mask-document", help="Mask PII in a PDF/Word/Excel/CSV/Markdown/text file (requires: pip install \"synthelion[documents]\")")
+    p_mask.add_argument("path", help="Path to the input file")
+    p_mask.add_argument("--output", "-o", help="Output path (default: <name>.masked.<ext> next to the input)")
+    p_mask.add_argument("--language", "-L", default=None, help="ISO 639-3 code (default: from privacy config)")
+    p_mask.add_argument("--json", action="store_true")
+
     args = parser.parse_args()
 
     if args.cmd == "version":
@@ -262,6 +278,8 @@ def main() -> None:
         _cmd_loop_check(args)
     elif args.cmd == "loop-reset":
         _cmd_loop_reset(args)
+    elif args.cmd == "firewall-check":
+        _cmd_firewall_check(args)
     elif args.cmd == "cluster":
         _cmd_cluster(args)
     elif args.cmd == "retrieve":
@@ -272,6 +290,8 @@ def main() -> None:
         _cmd_learn(args)
     elif args.cmd == "memory":
         _cmd_memory(args)
+    elif args.cmd == "mask-document":
+        _cmd_mask_document(args)
 
 
 def _read_input(args) -> str:
@@ -322,6 +342,7 @@ def _cmd_compress(args) -> None:
         from synthelion.config import default_compression_level
         args.level = default_compression_level()
     text = _read_input(args)
+    _original_text = text
 
     # Privacy pre-pass: this is the exact command the UserPromptSubmit hook calls
     # (see install_claude.py/.ps1/.sh) — masking PII here means it's active for
@@ -380,14 +401,28 @@ def _cmd_compress(args) -> None:
         and privacy_score is not None and privacy_score >= pcfg.get("block_min_score", 61)
     )
 
-    svc = CompressionService()
+    # EnterpriseGuard: outbound DLP, independent of and complementary to the
+    # PII pre-pass above — credential-shaped content (cloud/database/FTP/git
+    # secrets, private keys, bulk .env dumps) has no safe redacted form the
+    # way PII does, so unlike privacy.block_on_risk this is always
+    # block-or-allow, never mask-and-continue, whenever it fires. Checked
+    # against the ORIGINAL (pre-privacy-masking) text: PrivacyGuard's own
+    # masking can replace a hostname/value inside a connection string with a
+    # [PG_n] placeholder, which would break EnterpriseGuard's shape match and
+    # let a real secret slip through as a false negative.
+    from synthelion.enterprise_guard import EnterpriseGuard
+    eg_result = EnterpriseGuard().check_text(_original_text)
+
+    from synthelion.global_idf_provider import GlobalIdfProvider
+    svc = CompressionService(global_idf=GlobalIdfProvider())
     start = time.perf_counter()
-    r = svc.compress(text, level_map[args.level], iso3=args.language)
-    duration_ms = (time.perf_counter() - start) * 1000
-    _record_ledger(
-        "cli_compress", r.original_tokens, r.compressed_tokens, language=args.language or "",
-        duration_ms=duration_ms, pii_masked_count=privacy_masked_count,
-    )
+    r = svc.compress(text, level_map[args.level], iso3=args.language) if not (privacy_blocked or eg_result.blocked) else None
+    duration_ms = (time.perf_counter() - start) * 1000 if r is not None else 0.0
+    if r is not None:
+        _record_ledger(
+            "cli_compress", r.original_tokens, r.compressed_tokens, language=args.language or "",
+            duration_ms=duration_ms, pii_masked_count=privacy_masked_count,
+        )
 
     # Full human-readable breakdown — savings + complete PII/privacy note +
     # AI Act transparency notice — used both as the hook's `systemMessage`
@@ -398,8 +433,11 @@ def _cmd_compress(args) -> None:
     # same PII/AI-Act disclosure, not just Claude Code's hook.
     from synthelion.privacy_analyzer import build_privacy_notice
     pii_notice = build_privacy_notice(presult, transparency_notice, blocked=privacy_blocked)
+    blocked = privacy_blocked or eg_result.blocked
     if privacy_blocked:
         notice = pii_notice
+    elif eg_result.blocked:
+        notice = eg_result.reason
     else:
         pct = round(r.efficiency_pct)
         savings_line = f"[Synthelion {pct}% saved - {round(r.estimated_energy_saved_mwh, 3)} mWh - {round(r.estimated_co2_saved_mg, 3)} mg CO2 saved]"
@@ -407,10 +445,10 @@ def _cmd_compress(args) -> None:
 
     if args.json:
         print(json.dumps({
-            "compressed": r.compressed_text,
-            "efficiency_pct": round(r.efficiency_pct, 2),
-            "energy_mwh": round(r.estimated_energy_saved_mwh, 3),
-            "co2_mg": round(r.estimated_co2_saved_mg, 3),
+            "compressed": r.compressed_text if r is not None else "",
+            "efficiency_pct": round(r.efficiency_pct, 2) if r is not None else 0.0,
+            "energy_mwh": round(r.estimated_energy_saved_mwh, 3) if r is not None else 0.0,
+            "co2_mg": round(r.estimated_co2_saved_mg, 3) if r is not None else 0.0,
             "privacy_masked": privacy_masked,
             "privacy_masked_count": privacy_masked_count,
             "privacy_score": privacy_score,
@@ -419,13 +457,102 @@ def _cmd_compress(args) -> None:
             "privacy_compliance": privacy_compliance,
             "prompt_injection_score": injection_score,
             "ai_transparency_notice": transparency_notice,
-            "blocked": privacy_blocked,
+            "blocked": blocked,
+            "enterprise_guard_blocked": eg_result.blocked,
+            "enterprise_guard_category": eg_result.category,
             "notice": notice,
         }))
+    elif blocked:
+        print(f"BLOCKED: {notice}", file=sys.stderr)
+        raise SystemExit(1)
     else:
         print(r.compressed_text)
         suffix = f" — {privacy_masked_count} sensitive item(s) masked" if privacy_masked else ""
         print(f"\n[{r.efficiency_pct:.1f}% saved — {r.original_tokens} → {r.compressed_tokens} tokens{suffix}]", file=sys.stderr)
+
+
+def _default_masked_output_path(path: str, output_suffix: str) -> str:
+    from pathlib import Path
+    p = Path(path)
+    return str(p.with_name(f"{p.stem}{output_suffix}{p.suffix}"))
+
+
+def _cmd_mask_document(args) -> None:
+    import os
+    import time
+    from synthelion.config import documents_config, privacy_config
+    from synthelion.privacy_analyzer import PrivacyAnalyzer
+    from synthelion.privacy_session import PrivacySession
+    from synthelion import document_extractor as de
+
+    dcfg = documents_config()
+    pcfg = privacy_config()
+    language = args.language or pcfg.get("language", "en")
+
+    max_bytes = dcfg["max_file_size_mb"] * 1024 * 1024
+    size = os.path.getsize(args.path)
+    if size > max_bytes:
+        print(
+            f"ERROR: file is {size / (1024 * 1024):.1f} MB, exceeds documents.max_file_size_mb ({dcfg['max_file_size_mb']})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    fmt = de.detect_format(args.path)
+    output_path = args.output or _default_masked_output_path(args.path, dcfg["output_suffix"])
+
+    analyzer = PrivacyAnalyzer()
+    if pcfg.get("whitelist"):
+        analyzer.add_to_whitelist(*pcfg["whitelist"])
+    session = PrivacySession()
+
+    start = time.perf_counter()
+
+    if fmt == "docx":
+        doc = de.load_docx(args.path)
+        de.mask_docx_in_place(doc, analyzer, session, language)
+        doc.save(output_path)
+    elif fmt == "xlsx":
+        wb = de.load_xlsx(args.path)
+        de.mask_xlsx_in_place(wb, analyzer, session, language)
+        wb.save(output_path)
+    else:
+        from synthelion.privacy_stream import PrivacyStreamMasker
+        masker = PrivacyStreamMasker(
+            analyzer=analyzer, session=session, language=language, overlap_chars=dcfg["chunk_overlap_chars"],
+        )
+        if fmt == "pdf":
+            chunks = de.extract_pdf_text(args.path)
+        elif fmt == "csv":
+            chunks = de.extract_csv_rows(args.path)
+        else:
+            chunks = de.extract_text_chunks(args.path)
+        parts = [masker.feed(chunk) for chunk in chunks]
+        parts.append(masker.flush())
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write("".join(parts))
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    masked_count = session.count
+    # Redacted summary only — placeholder + category, never the original
+    # values (see PrivacySession.summary()'s docstring).
+    detected_categories = sorted({entry["category"] for entry in session.summary()})
+    _record_ledger("cli_mask_document", 0, 0, language=language, duration_ms=duration_ms, pii_masked_count=masked_count)
+
+    if masked_count:
+        notice = f"[Synthelion] {masked_count} PII item(s) masked ({', '.join(detected_categories)}) -> {output_path}"
+    else:
+        notice = f"[Synthelion] No PII detected -> {output_path}"
+
+    if args.json:
+        print(json.dumps({
+            "output_path": output_path,
+            "masked_count": masked_count,
+            "detected_categories": detected_categories,
+            "notice": notice,
+        }))
+    else:
+        print(notice)
 
 
 def _cmd_version(args) -> None:
@@ -477,8 +604,9 @@ def _cmd_summarize(args) -> None:
     import time
     from synthelion.nlp.summarizer import TfIdfSummarizer
     from synthelion.nlp.text_rank import TextRankSummarizer
+    from synthelion.global_idf_provider import GlobalIdfProvider
     text = _read_input(args)
-    summ = TfIdfSummarizer() if args.algo == "tfidf" else TextRankSummarizer()
+    summ = TfIdfSummarizer(global_idf=GlobalIdfProvider()) if args.algo == "tfidf" else TextRankSummarizer()
     start = time.perf_counter()
     summary = summ.summarize(text, sentence_count=args.sentences, ratio=args.ratio)
     duration_ms = (time.perf_counter() - start) * 1000
@@ -1808,6 +1936,40 @@ def _cmd_loop_reset(args) -> None:
     from synthelion.loop_guard import PersistentLoopGuard
     PersistentLoopGuard().reset(session_id=args.session)
     print(f"[OK] Loop-guard history reset for session '{args.session}'")
+
+
+def _cmd_firewall_check(args) -> None:
+    """Pre-tool guardrail, meant to run as an agent hook (e.g. Claude Code's
+    PreToolUse): vetoes a tool call that would read a file matching a
+    configured "security zone" pattern, or that embeds credential-shaped
+    content (cloud/database/FTP/git secrets, private keys, bulk .env dumps).
+    Exit code doubles as the verdict: 0 = allow, 2 = block, without needing
+    --json. See `synthelion/enterprise_guard.py`.
+    """
+    from synthelion.enterprise_guard import EnterpriseGuard
+
+    try:
+        arguments = json.loads(args.args) if args.args else {}
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: --args is not valid JSON: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+    guard = EnterpriseGuard()
+    result = guard.check_tool_call(args.tool, arguments)
+
+    if args.json:
+        print(json.dumps({
+            "blocked": result.blocked,
+            "category": result.category,
+            "rule_name": result.rule_name,
+            "reason": result.reason,
+        }, ensure_ascii=False))
+    elif result.blocked:
+        print(f"BLOCK: {result.reason}", file=sys.stderr)
+    else:
+        print("ALLOW")
+
+    raise SystemExit(2 if result.blocked else 0)
 
 
 if __name__ == "__main__":

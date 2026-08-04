@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "synthelion"
-version = "1.2.4"
+version = "1.2.5"
 description = "Universal token compressor for AI agents — MCP, OpenAI, LangChain, CLI. 50+ languages, zero ML models."
 readme = "README.md"
 license = "MIT"
@@ -49,9 +49,11 @@ qdrant = ["qdrant-client>=1.9"]
 redis = ["redis>=5.0"]
 postgres = ["psycopg[binary]>=3.1"]
 cluster = ["redis>=5.0", "psycopg[binary]>=3.1", "qdrant-client>=1.9"]
+documents = ["pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1"]
 all = [
     "openai>=1.0", "langchain-core>=0.1", "anthropic>=0.25", "crewai>=1.15,<2",
     "chromadb>=0.4", "qdrant-client>=1.9", "redis>=5.0", "psycopg[binary]>=3.1",
+    "pypdf>=4.0", "python-docx>=1.1", "openpyxl>=3.1",
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 

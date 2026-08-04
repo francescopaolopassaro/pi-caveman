@@ -74,6 +74,8 @@ Every token sent to a model costs money and time. Synthelion removes the words t
 
 A direct Python port of **[Caveman.PrivacyGuard](https://github.com/francescopaolopassaro/Caveman.PrivacyGuard)** (the same C# enterprise PII analyzer used in production Caveman deployments) — not a new, thinner reimplementation, the actual rule set, scoring formula, and ~30 algorithmic checksum validators, unchanged. Same zero-ML philosophy as the rest of Synthelion: every detection is a compiled regex plus, for the categories where it matters, a real checksum algorithm — not just a format guess.
 
+> ⚠️ **Disclaimer**: PrivacyGuard is a technical support tool. It does not replace a Data Protection Impact Assessment (DPIA) or the advice of a DPO (Data Protection Officer). GDPR, AI Act, and NIS2 compliance require contextual legal assessment, a documented legal basis, and organizational processes that no library can substitute for. (Same disclaimer as the original [Caveman.PrivacyGuard](https://github.com/francescopaolopassaro/Caveman.PrivacyGuard) — this is a direct port, so it carries the same limitation.)
+
 - **33 country/region rule sets** (27 EU + UK, Switzerland, China, Russia, Ukraine), **51 detection rules**: email, phone (E.164), IBAN, credit cards, national tax/ID numbers (Italian CF/P.IVA, French NIR, Spanish NIF, Polish PESEL, German Steuer-ID, UK NINO, Swiss AHV, Chinese ID, Russian INN, and 20+ more), GPS coordinates, vehicle plates, JWTs/API secrets, and more.
 - **Real checksum validation, not just regex** — an IBAN, a Luhn-valid credit card, an Italian Codice Fiscale, a Polish PESEL, etc. are verified algorithmically, so a random 16-digit number doesn't get flagged as a credit card just because it matches the shape.
 - **Compliance-flag mapping** — GDPR, EU AI Act, NIS2, PCI-DSS, and NIST 800-53 flags attached automatically based on what's detected.
@@ -189,6 +191,205 @@ Larger, more realistic payloads compress further than tiny samples — the log
 benchmark above is a 20-repeat retry burst (a real flaky-dependency scenario),
 where `LogCompressor`'s dedup collapses near-identical stack traces down to
 one occurrence plus a counter.
+
+---
+
+#### Global IDF-aware compression & summarization (56 languages)
+
+`synthelion/global_idf_provider.py` ships a precomputed, per-language global
+document-frequency table (built offline from Wikipedia,
+`devtools/build_idf_corpus_wikipedia.ps1`, ~127 MB total across 56 languages in
+`synthelion/worddata/`) and blends it 50/50 with the existing local (single-
+prompt) IDF wherever Synthelion scores word/sentence importance statistically.
+**Wired into production as of this writing**: the `compress` command's
+`statistical` level (`synthelion/core.py`'s `_filter_statistical`) and the
+`summarize` command's `tfidf` algorithm (`TfIdfSummarizer`) — both the CLI,
+the MCP/OpenAI-function tools, and the local reverse proxy (`synthelion serve-proxy`)
+now construct these with `global_idf=GlobalIdfProvider()` by default. The
+Claude Code hook goes through the same `compress` CLI path, so it benefits
+automatically. Other compression levels (`light`/`semantic`/`aggressive`/
+`syntactic`) are pure token-filter/lemma logic with no frequency scoring, so
+global IDF doesn't apply to them.
+
+**Compression level `statistical` — extra tokens dropped, global vs local-only IDF**
+(15 real Wikipedia paragraphs per language, same content both runs):
+
+| Lang | Local-only | +Global | Δ | Lang | Local-only | +Global | Δ | Lang | Local-only | +Global | Δ |
+|:---|---:|---:|---:|:---|---:|---:|---:|:---|---:|---:|---:|
+| af | 45.5% | 58.6% | +13.2pp | he | 32.4% | 61.7% | +29.4pp | pl | 43.2% | 63.0% | +19.7pp |
+| ar | 15.7% | 42.4% | +26.7pp | hi | 46.9% | 48.3% | +1.4pp | pt | 40.0% | 62.4% | +22.4pp |
+| be | 36.7% | 57.1% | +20.4pp | hr | 41.2% | 61.8% | +20.6pp | ro | 41.7% | 58.5% | +16.9pp |
+| bg | 30.6% | 48.2% | +17.5pp | hu | 42.1% | 64.6% | +22.5pp | ru | 20.8% | 46.1% | +25.4pp |
+| bn | 37.4% | 39.2% | +1.8pp | hy | 22.0% | 45.5% | +23.6pp | sk | 40.7% | 60.7% | +20.1pp |
+| ca | 49.8% | 63.9% | +14.2pp | id | 51.6% | 65.8% | +14.3pp | sl | 45.7% | 65.2% | +19.4pp |
+| cs | 37.1% | 58.0% | +21.0pp | is | 38.7% | 58.8% | +20.1pp | sq | 32.0% | 54.6% | +22.6pp |
+| da | 47.4% | 62.8% | +15.4pp | it | 47.7% | 65.3% | +17.6pp | sr | 27.4% | 49.7% | +22.3pp |
+| de | 43.7% | 64.3% | +20.5pp | ja | 43.7% | 48.5% | +4.7pp | sv | 48.4% | 65.7% | +17.3pp |
+| el | 15.1% | 46.9% | +31.8pp | kk | 28.4% | 53.3% | +24.9pp | ta | 28.0% | 31.3% | +3.3pp |
+| en | 50.5% | 67.3% | +16.8pp | kn | 28.5% | 29.7% | +1.2pp | te | 26.3% | 27.2% | +0.9pp |
+| es | 50.9% | 66.7% | +15.7pp | ko | 19.8% | 49.8% | +30.0pp | th | 14.3% | 19.6% | +5.3pp |
+| et | 37.0% | 59.7% | +22.7pp | la | 46.7% | 60.5% | +13.8pp | tr | 38.3% | 49.0% | +10.7pp |
+| eu | 46.5% | 66.3% | +19.8pp | lt | 38.6% | 58.2% | +19.6pp | uk | 36.5% | 59.1% | +22.6pp |
+| fa | 14.4% | 42.3% | +28.0pp | lv | 35.0% | 60.4% | +25.4pp | ur | 28.4% | 52.5% | +24.1pp |
+| fi | 35.8% | 49.0% | +13.2pp | mk | 44.9% | 64.5% | +19.6pp | vi | 32.5% | 49.2% | +16.7pp |
+| fr | 42.4% | 60.6% | +18.3pp | mr | 34.9% | 38.2% | +3.3pp | zh | 38.9% | 40.6% | +1.7pp |
+| ga | 46.7% | 61.2% | +14.5pp | ms | 48.2% | 58.8% | +10.6pp | | | | |
+| gl | 48.9% | 69.6% | +20.7pp | nl | 43.7% | 62.7% | +18.9pp | | | | |
+| no | 46.3% | 57.4% | +11.1pp | | | | | | | | |
+
+**Aggregate: 37.4% → 54.5% average tokens dropped (+17.1pp)** — the global
+reference consistently lets `statistical` recognize more true filler/generic
+words per language than a single prompt's own local frequencies can, without
+any empty-output regressions (0 empty results across all 56 × 15 samples —
+the existing per-sentence safety floor holds). Larger gains cluster in
+languages whose local-only baseline was weakest (`el`, `fa`, `ar`, `ko`, `he`,
+`ru` all gained 25pp+) — global grounding helps most exactly where a single
+short prompt has too little internal repetition for local IDF to work well.
+
+**Quality check (not just a shorter output — still on-topic):** spot-checked
+English/Italian/French/Spanish/German samples by reading them directly.
+Example (English, ratio unrelated — `statistical` keeps content words, not
+full sentences):
+> local-only: *"trace anarchist idea throughout history modern anarchism
+> emerge Enlightenment latter half 19th decade 20th century anarchist
+> movement flourish parts significant role worker struggle..."*
+> +global: *"trace anarchist anarchism emerge Enlightenment 19th decade 20th
+> century anarchist movement flourish worker struggle forget emancipation
+> anarchist anarchists Paris Commune Russian Civil War Spanish Civil War..."*
+
+The global-blended version drops generic connective filler (`half`, `latter`,
+`parts`) that the local-only run kept, while holding on to the repeated
+domain terms (`anarchist`/`anarchism`/`movement`) — a real, correctly-directed
+quality shift, not just more aggressive truncation.
+
+---
+
+#### `TfIdfSummarizer` (extractive `summarize`, `tfidf` algorithm)
+
+Since the sentence *budget* (`ratio`/`sentence_count`) is fixed regardless of
+scoring, output length barely moves — the metric that actually shows the
+global table's effect is **which sentences get selected**. Measured on 12
+real Wikipedia articles per language (ratio 0.3), comparing local-only vs
+local+global blended scoring:
+
+| Lang | Selected-sentence overlap | Lang | Selected-sentence overlap | Lang | Selected-sentence overlap |
+|:---|---:|:---|---:|:---|---:|
+| af | 64.1% | he | 57.3% | pl | 58.5% |
+| ar | 79.1% | hi | 83.3% | pt | 78.6% |
+| be | 62.9% | hr | 67.5% | ro | 66.9% |
+| bg | 73.2% | hu | 72.8% | ru | 64.0% |
+| bn | 100.0%* | hy | 100.0%* | sk | 60.0% |
+| ca | 79.9% | id | 70.3% | sl | 67.1% |
+| cs | 68.0% | is | 70.9% | sq | 74.7% |
+| da | 63.9% | it | 70.3% | sr | 73.5% |
+| de | 100.0%* | ja | 97.8% | sv | 80.4% |
+| el | 80.5% | kk | 69.2% | ta | 68.3% |
+| en | 62.8% | kn | 57.7% | te | 55.2% |
+| es | 73.3% | ko | 61.1% | th | 83.3% |
+| et | 56.9% | la | 65.2% | tr | 74.7% |
+| eu | 66.5% | lt | 71.9% | uk | 72.2% |
+| fa | 69.8% | lv | 66.5% | ur | 100.0%* |
+| fi | 70.5% | mk | 77.2% | vi | 61.1% |
+| fr | 55.4% | mr | 68.7% | zh | 83.1% |
+| ga | 70.3% | ms | 64.5% | | |
+| gl | 75.3% | nl | 53.7% | | |
+| no | 58.0% | | | | |
+
+**Aggregate: 71.4% average sentence overlap across all 56 languages** — meaning
+on average **~29% of selected sentences change** when the global table is
+blended in, i.e. the global signal has a real, non-trivial effect on which
+content gets kept. `*` — af/bn/de/hy/ur showed 0% change on this specific
+sample because the sample documents were short enough to fall below the
+sentence-budget threshold (both variants returned the full text unchanged),
+not because the global table has no effect for those languages.
+
+Per-language `.idf.br` tables live in `synthelion/worddata/` (built from each
+language's Wikipedia `pages-articles-multistream1` shard, ~127 MB total across
+all 56 languages, shipped in the base package).
+
+#### `aggressive` compression level — also global-IDF-aware (56 languages)
+
+`_filter_aggressive` now additionally drops a word when the global table says
+it appears in **more than 50% of the entire reference corpus's documents** for
+that language — i.e. it's functionally generic even though the hand-curated
+`fw`/`generic` word lists missed it (those lists can't be exhaustive). The
+threshold is deliberately conservative: a past incident (see `_EN_ADV`/`_EN_ADJ`
+history in `core.py`) already showed that being too aggressive about "this is
+just filler" silently drops real content (a sentence's main verb, or a
+domain-specifying adjective like "financial" in "quarterly financial report").
+`light`/`semantic`/`syntactic` are untouched — `semantic` in particular is
+meant to stay closest to lossless, and `syntactic`'s grammatical-glue logic
+doesn't have an equivalent single-word drop point to extend safely.
+
+| Lang | Local-only | +Global | Δ | Lang | Local-only | +Global | Δ | Lang | Local-only | +Global | Δ |
+|:---|---:|---:|---:|:---|---:|---:|---:|:---|---:|---:|---:|
+| af | 49.8% | 49.8% | +0.0pp | he | 33.2% | 33.2% | +0.0pp | pl | 43.6% | 43.6% | +0.0pp |
+| ar | 16.0% | 19.9% | +3.9pp | hi | 52.4% | 52.4% | +0.0pp | pt | 44.1% | 44.1% | +0.0pp |
+| be | 39.0% | 39.0% | +0.0pp | hr | 41.8% | 41.8% | +0.0pp | ro | 42.2% | 42.2% | +0.0pp |
+| bg | 36.1% | 39.2% | +3.1pp | hu | 42.1% | 42.1% | +0.0pp | ru | 33.1% | 33.1% | +0.0pp |
+| bn | 38.2% | 38.2% | +0.0pp | hy | 31.1% | 31.1% | +0.0pp | sk | 40.2% | 40.2% | +0.0pp |
+| ca | 49.9% | 49.9% | +0.0pp | id | 53.1% | 53.1% | +0.0pp | sl | 48.2% | 48.2% | +0.0pp |
+| cs | 37.3% | 37.3% | +0.0pp | is | 44.2% | 44.2% | +0.0pp | sq | 32.3% | 40.7% | +8.4pp |
+| da | 52.1% | 52.1% | +0.0pp | it | 53.5% | 53.5% | +0.0pp | sr | 33.5% | 33.5% | +0.0pp |
+| de | 47.3% | 47.3% | +0.0pp | ja | 88.5% | 88.5% | +0.0pp | sv | 50.5% | 50.5% | +0.0pp |
+| el | 18.7% | 18.7% | +0.0pp | kk | 31.0% | 31.0% | +0.0pp | ta | 28.6% | 28.6% | +0.0pp |
+| en | 56.7% | 56.7% | +0.0pp | kn | 28.6% | 28.6% | +0.0pp | te | 28.3% | 28.3% | +0.0pp |
+| es | 53.5% | 53.5% | +0.0pp | ko | 25.0% | 25.0% | +0.0pp | th | 22.1% | 22.1% | +0.0pp |
+| et | 37.3% | 37.3% | +0.0pp | la | 49.1% | 49.1% | +0.0pp | tr | 37.8% | 37.8% | +0.0pp |
+| eu | 48.3% | 48.3% | +0.0pp | lt | 40.7% | 40.7% | +0.0pp | uk | 51.1% | 51.1% | +0.0pp |
+| fa | 18.1% | 18.1% | +0.0pp | lv | 35.5% | 35.5% | +0.0pp | ur | 28.6% | 28.6% | +0.0pp |
+| fi | 36.1% | 36.1% | +0.0pp | mk | 47.6% | 47.6% | +0.0pp | vi | 33.5% | 33.5% | +0.0pp |
+| fr | 47.0% | 47.0% | +0.0pp | mr | 36.8% | 36.8% | +0.0pp | zh | 90.1% | 90.1% | +0.0pp |
+| ga | 50.5% | 50.5% | +0.0pp | ms | 48.2% | 48.2% | +0.0pp | | | | |
+| gl | 51.3% | 51.3% | +0.0pp | nl | 49.5% | 49.5% | +0.0pp | | | | |
+| no | 49.2% | 49.2% | +0.0pp | | | | | | | | |
+
+**Aggregate: 42.00% → 42.27% (+0.27pp)** — much smaller than `statistical`'s
++17.1pp, and that's the honest, expected result: `aggressive`'s hand-curated
+`generic`/`fw` word lists already catch nearly every truly-ubiquitous word for
+most languages, so the new global-ubiquity check rarely finds anything new to
+drop. Only `ar`/`bg`/`sq` showed a real effect on this sample, meaning their
+curated generic-word lists have gaps the global reference happened to catch —
+useful as a small safety net, not a major lever, for this level. Zero
+empty-output regressions across all 56 × 15 samples (the existing "never
+empty a non-empty sentence" fallback holds under the new drop condition too —
+covered by `TestCompressionServiceGlobalIdf` in `tests/test_synthelion.py`).
+
+#### Data source, license & operational notes
+
+- **Source & attribution**: the `.idf.br` tables are derived from [Wikipedia](https://www.wikipedia.org/)
+  dumps (`https://dumps.wikimedia.org/`), each language's `pages-articles-multistream1`
+  shard. Wikipedia's text content is licensed [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+  (and GFDL); what Synthelion ships is a derived **aggregate statistic** — a
+  `word → document-frequency count` table, not article text or any reproduction
+  of the original prose — but the source is credited here regardless, per the
+  Wikimedia Foundation's trademark/attribution expectations for reuse.
+- **Corpus limitation — not a random sample**: `multistream1` is the *first*
+  page-id shard of each wiki, not a random cross-section of the whole
+  encyclopedia. For large wikis (en/fr/de/...) that's still hundreds of
+  thousands of real articles, but it systematically skews toward
+  earlier-created/earlier-indexed topics rather than the wiki's full breadth.
+  Good enough to meaningfully outperform local-only IDF (see benchmarks
+  above), not a claim of a statistically neutral reference corpus.
+- **No freshness/versioning yet**: the tables are a one-time snapshot (built
+  2026-08-03/04). There's no metadata recording the build date inside the
+  `.idf.br` file itself and no automatic refresh — rebuilding is a manual
+  `devtools/build_idf_corpus_wikipedia.ps1` run (per-language, skips a
+  language whose table already exists unless `-Force`).
+- **Lazy loading is the intentional default, not an oversight**: each
+  language's table is decompressed and parsed into memory only on first use,
+  then cached for the process lifetime (`GlobalIdfProvider`, a thread-safe
+  class-level cache). Measured cost: ~0.01 ms for a cached lookup, but
+  **up to ~700 ms the first time a specific language is used** (largest
+  table: Bulgarian, 2.68M reference documents / 1.14M terms). We measured
+  eagerly preloading **all 56 languages** at process startup — 44.7 seconds
+  and tens of millions of live dict entries in memory — and rejected that as
+  the default; it would trade a rare per-language latency blip for a
+  guaranteed, large, permanent memory/startup cost paid by every process
+  regardless of which languages it actually serves. `GlobalIdfProvider.preload(["eng", "ita"])`
+  is available for operators who know in advance which specific languages a
+  long-running deployment (proxy, dashboard) will actually serve and want to
+  warm just those ahead of the first request.
 
 ---
 

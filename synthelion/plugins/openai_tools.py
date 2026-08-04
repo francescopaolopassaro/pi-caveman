@@ -17,10 +17,11 @@ import time
 
 from synthelion.core import CompressionService
 from synthelion.detector import LanguageDetector
+from synthelion.global_idf_provider import GlobalIdfProvider
 from synthelion.models import CompressionLevel, CompressionProfile
 from synthelion.nlp.text_rank import TextRankSummarizer
 
-_svc = CompressionService()
+_svc = CompressionService(global_idf=GlobalIdfProvider())
 _det = LanguageDetector()
 _tr = TextRankSummarizer()
 
@@ -309,6 +310,36 @@ def get_tool_definitions() -> list[dict]:
                 },
             },
         },
+        # ── document PII masking (PDF/Word/Excel/CSV/Markdown/text) ───────────
+        {
+            "type": "function",
+            "function": {
+                "name": "mask_document",
+                "description": (
+                    "Mask PII in a PDF/Word/Excel/CSV/Markdown/text file by path. "
+                    "PDF/CSV/Markdown/plain-text return masked text; DOCX/XLSX are "
+                    "edited in-place into a new masked copy (the original file is "
+                    "never overwritten). Writes a file to disk — not read-only. "
+                    "Requires the host to have installed synthelion[documents]."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute or relative path to the input file."},
+                        "output_path": {
+                            "type": "string",
+                            "description": "Optional output path. Default: <name>.masked.<ext> next to the input.",
+                        },
+                        "language": {"type": "string", "description": "ISO 639-3 code. Default: from privacy config."},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Reuse an existing PrivacySession id (see analyze_privacy) so restore_privacy_text works across calls.",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
         # ── session / memory tools (mirrors tokensave pattern) ────────────────
         {
             "type": "function",
@@ -427,6 +458,27 @@ def get_tool_definitions() -> list[dict]:
                     "type": "object",
                     "properties": {"text": {"type": "string", "description": "Text to scan."}},
                     "required": ["text"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_enterprise_guard",
+                "description": (
+                    "EnterpriseGuard: checks text for outbound-DLP-worthy content (cloud/database/"
+                    "FTP/git credentials, private keys, bulk .env dumps) and/or a file path against "
+                    "the configured protected security-zone patterns. Read-only/advisory here — the "
+                    "actual enforcement on the compress/summarize path is automatic; use this to "
+                    "pre-check something (e.g. before reading a file) or to explain why a prior call "
+                    "was blocked."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Text to scan for credential-shaped content."},
+                        "path": {"type": "string", "description": "File path to check against protected security-zone patterns."},
+                    },
                 },
             },
         },
@@ -961,6 +1013,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         # function-calling client actually call for compression, so it needs
         # the same masking/block-on-risk guard, not just the terminal hook.
         text = arguments["text"]
+        _original_text = text
         from synthelion.config import privacy_config
         pcfg = privacy_config()
         if pcfg["enabled"]:
@@ -984,6 +1037,15 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
             if pcfg["auto_masking"] and presult.masked_text:
                 text = presult.masked_text
+
+        # EnterpriseGuard: outbound DLP, independent of the PII pre-pass above —
+        # credential-shaped content has no safe redacted form, always block-or-allow.
+        # Checked against the ORIGINAL (pre-privacy-masking) text — see cli.py's
+        # identical comment for why (masking can break a secret's regex shape).
+        from synthelion.enterprise_guard import EnterpriseGuard, EnterpriseGuardBlockedError
+        eg_result = EnterpriseGuard().check_text(_original_text)
+        if eg_result.blocked:
+            raise EnterpriseGuardBlockedError(eg_result)
 
         level = _LEVEL_MAP.get((arguments.get("level") or _default_level()).lower(), CompressionLevel.SEMANTIC)
         r = _svc.compress(text, level, iso3=arguments.get("language"))
@@ -1036,7 +1098,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         ratio = arguments.get("ratio")
         if algo == "tfidf":
             from synthelion.nlp.summarizer import TfIdfSummarizer
-            summ = TfIdfSummarizer()
+            summ = TfIdfSummarizer(global_idf=GlobalIdfProvider())
         else:
             summ = _tr
         summary = summ.summarize(text, sentence_count=sc, ratio=ratio)
@@ -1068,6 +1130,9 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
     if name == "compress_file":
         return _exec_compress_file(arguments)
+
+    if name == "mask_document":
+        return _exec_mask_document(arguments)
 
     if name == "compress_for_context":
         return _exec_compress_for_context(arguments)
@@ -1124,6 +1189,9 @@ def execute_tool(name: str, arguments: dict) -> dict:
 
     if name == "check_sensitive_content":
         return _exec_check_sensitive_content(arguments)
+
+    if name == "check_enterprise_guard":
+        return _exec_check_enterprise_guard(arguments)
 
     if name == "analyze_waste":
         return _exec_analyze_waste(arguments)
@@ -1278,6 +1346,77 @@ def _exec_compress_file(arguments: dict) -> dict:
     result["path"] = path
     result["file_size_chars"] = len(content)
     return result
+
+
+def _exec_mask_document(arguments: dict) -> dict:
+    import os
+    from synthelion.config import documents_config, privacy_config
+    from synthelion.privacy_analyzer import PrivacyAnalyzer
+    from synthelion import document_extractor as de
+
+    path = arguments["path"]
+    if not os.path.isfile(path):
+        return {"error": f"File not found: {path}"}
+
+    dcfg = documents_config()
+    pcfg = privacy_config()
+    language = arguments.get("language") or pcfg.get("language", "en")
+
+    max_bytes = dcfg["max_file_size_mb"] * 1024 * 1024
+    size = os.path.getsize(path)
+    if size > max_bytes:
+        return {"error": f"File is {size / (1024 * 1024):.1f} MB, exceeds documents.max_file_size_mb ({dcfg['max_file_size_mb']})"}
+
+    from synthelion.cli import _default_masked_output_path
+    output_path = arguments.get("output_path") or _default_masked_output_path(path, dcfg["output_suffix"])
+
+    analyzer = PrivacyAnalyzer()
+    if pcfg.get("whitelist"):
+        analyzer.add_to_whitelist(*pcfg["whitelist"])
+    session_id, session = _get_or_create_privacy_session(arguments.get("session_id"))
+    count_before = session.count
+
+    try:
+        fmt = de.detect_format(path)
+        if fmt == "docx":
+            doc = de.load_docx(path)
+            de.mask_docx_in_place(doc, analyzer, session, language)
+            doc.save(output_path)
+        elif fmt == "xlsx":
+            wb = de.load_xlsx(path)
+            de.mask_xlsx_in_place(wb, analyzer, session, language)
+            wb.save(output_path)
+        else:
+            from synthelion.privacy_stream import PrivacyStreamMasker
+            masker = PrivacyStreamMasker(
+                analyzer=analyzer, session=session, language=language, overlap_chars=dcfg["chunk_overlap_chars"],
+            )
+            if fmt == "pdf":
+                chunks = de.extract_pdf_text(path)
+            elif fmt == "csv":
+                chunks = de.extract_csv_rows(path)
+            else:
+                chunks = de.extract_text_chunks(path)
+            parts = [masker.feed(chunk) for chunk in chunks]
+            parts.append(masker.flush())
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write("".join(parts))
+    except ImportError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": f"Masking failed: {exc}"}
+
+    # Redacted summary only (placeholder + category) — never the original
+    # values; see PrivacySession.summary()'s docstring. Sliced to just the
+    # entries added by this call, since a reused session_id may already carry
+    # entries from earlier calls.
+    new_entries = session.summary()[count_before:]
+    return {
+        "output_path": output_path,
+        "masked_count": len(new_entries),
+        "detected_categories": sorted({entry["category"] for entry in new_entries}),
+        "session_id": session_id,
+    }
 
 
 def _exec_compress_for_context(arguments: dict) -> dict:
@@ -1463,6 +1602,30 @@ def _exec_check_sensitive_content(arguments: dict) -> dict:
     from synthelion.sensitive_guard import find_sensitive
     match = find_sensitive(arguments["text"])
     return {"sensitive": match is not None, "class": match}
+
+
+def _exec_check_enterprise_guard(arguments: dict) -> dict:
+    from synthelion.enterprise_guard import EnterpriseGuard
+    guard = EnterpriseGuard()
+    text = arguments.get("text")
+    path = arguments.get("path")
+    result = None
+    if text:
+        result = guard.check_text(text)
+    if (result is None or not result.blocked) and path:
+        path_result = guard.check_path(path)
+        if path_result.blocked:
+            result = path_result
+        elif result is None:
+            result = path_result
+    if result is None:
+        result = guard.check_text("")
+    return {
+        "blocked": result.blocked,
+        "category": result.category,
+        "rule_name": result.rule_name,
+        "reason": result.reason,
+    }
 
 
 def _exec_analyze_waste(arguments: dict) -> dict:

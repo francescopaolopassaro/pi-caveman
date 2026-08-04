@@ -794,3 +794,51 @@ class TestDashboardClusterApi:
         body = resp.read().decode()
         assert resp.status == 200
         assert "kind: Deployment" in body
+
+
+class TestDashboardDocumentsApi:
+    def test_requires_auth(self, dashboard_server):
+        resp = _post_json(dashboard_server, "/api/documents/mask", {"filename": "a.txt", "content_base64": "aGk="})
+        resp.read()
+        assert resp.status == 401
+
+    def test_masks_plain_text_upload(self, dashboard_server):
+        import base64
+        cookie = _login(dashboard_server)
+        content = base64.b64encode(b"Contact me at mario.rossi@example.it please.").decode("ascii")
+        resp = _post_json(
+            dashboard_server, "/api/documents/mask",
+            {"filename": "note.txt", "content_base64": content}, cookie,
+        )
+        body = json.loads(resp.read())
+        assert resp.status == 200
+        assert "mario.rossi@example.it" not in body["masked_text"]
+        assert "Email" in body["detected_categories"]
+        assert body["masked_count"] >= 1
+
+    def test_rejects_invalid_base64(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(
+            dashboard_server, "/api/documents/mask",
+            {"filename": "note.txt", "content_base64": "not-valid-base64!!"}, cookie,
+        )
+        body = json.loads(resp.read())
+        assert resp.status == 200
+        assert "error" in body
+
+    def test_rejects_oversized_upload(self, dashboard_server, monkeypatch):
+        import base64
+        from synthelion import config as config_module
+        cookie = _login(dashboard_server)
+        monkeypatch.setattr(
+            config_module, "_DEFAULT_CONFIG",
+            {**config_module._DEFAULT_CONFIG, "documents": {**config_module._DEFAULT_CONFIG["documents"], "max_file_size_mb": 0}},
+        )
+        content = base64.b64encode(b"tiny but over the configured 0 MB cap").decode("ascii")
+        resp = _post_json(
+            dashboard_server, "/api/documents/mask",
+            {"filename": "note.txt", "content_base64": content}, cookie,
+        )
+        body = json.loads(resp.read())
+        assert resp.status == 200
+        assert "error" in body

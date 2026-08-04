@@ -236,11 +236,21 @@ def _process_text(text: str, pcfg: dict, level_override: str | None = None, ccr:
         if pcfg.get("auto_masking") and result.masked_text and result.match_count > 0:
             text = result.masked_text
 
+    # EnterpriseGuard: outbound DLP, independent of the PII pre-pass above —
+    # credential-shaped content has no safe redacted form, always block-or-allow.
+    # Checked against the ORIGINAL (pre-privacy-masking) text — see cli.py's
+    # identical comment for why (masking can break a secret's regex shape).
+    from synthelion.enterprise_guard import EnterpriseGuard
+    eg_result = EnterpriseGuard().check_text(original_text)
+    if eg_result.blocked:
+        raise _Blocked(eg_result.reason)
+
     from synthelion.config import default_compression_level
     from synthelion.core import CompressionService
+    from synthelion.global_idf_provider import GlobalIdfProvider
 
     level_name = level_override or default_compression_level()
-    svc = CompressionService()
+    svc = CompressionService(global_idf=GlobalIdfProvider())
     r = svc.compress(text, _level_map().get(level_name, _level_map()["semantic"]))
     compressed = r.compressed_text or text
 

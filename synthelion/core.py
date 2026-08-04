@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from threading import Lock
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import regex
 
@@ -19,6 +19,9 @@ from synthelion import cjk_segmenter
 from synthelion.detector import LanguageDetector
 from synthelion.models import CompressionLevel, CompressionResult
 from synthelion.word_provider import FunctionWordProvider
+
+if TYPE_CHECKING:
+    from synthelion.global_idf_provider import GlobalIdfProvider
 
 # Ported from Caveman C# 1.4.1: \w in Python's stdlib `re` (like \p{L} in .NET) does not
 # include combining marks (Unicode category M*), so a regex-only tokenizer fragments words
@@ -183,9 +186,11 @@ class CompressionService:
         self,
         word_provider: FunctionWordProvider | None = None,
         detector: LanguageDetector | None = None,
+        global_idf: "GlobalIdfProvider | None" = None,
     ) -> None:
         self._provider = word_provider or FunctionWordProvider()
         self._detector = detector or LanguageDetector(self._provider)
+        self._global_idf = global_idf
         # Same hash→result/TTL/eviction pattern as ContentRouter.route() — repeated
         # identical calls (e.g. the same system prompt compressed every turn) skip
         # re-tokenizing/re-lemmatizing entirely. Keyed on (text, level, iso3): the
@@ -295,10 +300,14 @@ class CompressionService:
             filtered = _filter_semantic(tokens, fw, lemmas, proper_nouns, iso3, pos_tags)
         elif level == CompressionLevel.AGGRESSIVE:
             generic = self._provider.get_generic_words(iso3) or _GENERIC_FALLBACK
-            filtered = _filter_aggressive(tokens, fw, lemmas, proper_nouns, iso3, generic, pos_tags)
+            filtered = _filter_aggressive(
+                tokens, fw, lemmas, proper_nouns, iso3, generic, pos_tags, global_idf=self._global_idf,
+            )
         elif level == CompressionLevel.STATISTICAL:
             generic = self._provider.get_generic_words(iso3) or _GENERIC_FALLBACK
-            filtered = _filter_statistical(tokens, fw, lemmas, proper_nouns, iso3, generic, pos_tags)
+            filtered = _filter_statistical(
+                tokens, fw, lemmas, proper_nouns, iso3, generic, pos_tags, global_idf=self._global_idf,
+            )
         else:  # SYNTACTIC
             generic = self._provider.get_generic_words(iso3) or _GENERIC_FALLBACK
             filtered = _filter_syntactic(tokens, fw, lemmas, proper_nouns, iso3, generic, pos_tags)
@@ -433,6 +442,23 @@ def _filter_semantic(
     return out
 
 
+# A word appearing in more than this fraction of the global reference corpus's
+# documents is treated as functionally generic even if the curated fw/generic
+# lists missed it (they're hand-maintained and can't be exhaustive). Set high
+# and deliberately conservative: the past incident documented below (removing
+# "al"/"ical"/"are" suffix rules) lost real content by being too aggressive
+# about what counts as "just filler", so this only fires on words that are
+# near-ubiquitous globally, not merely common.
+_GLOBAL_UBIQUITY_THRESHOLD = 0.5
+
+
+def _is_globally_ubiquitous(word: str, iso3: str, global_idf: "GlobalIdfProvider") -> bool:
+    corpus_size = global_idf.get_corpus_size(iso3)
+    if corpus_size == 0:
+        return False
+    return (global_idf.get_document_frequency(word, iso3) / corpus_size) > _GLOBAL_UBIQUITY_THRESHOLD
+
+
 def _filter_aggressive(
     tokens: list[_Token],
     fw: frozenset[str],
@@ -441,12 +467,14 @@ def _filter_aggressive(
     iso3: str,
     generic: frozenset[str],
     pos_tags: dict[str, str] | None = None,
+    global_idf: "GlobalIdfProvider | None" = None,
 ) -> list[str]:
     # BUGFIX: this function referenced an undefined `group` name (missing the
     # _lang_group(iso3) call below), which raised NameError on every non-trivial
     # sentence — AGGRESSIVE mode was completely broken for any real content word.
     group = _lang_group(iso3)
     is_proper = _detect_proper_nouns(tokens, iso3, proper_nouns)
+    use_global = global_idf is not None and global_idf.has_data(iso3)
     out = []
 
     for i, tok in enumerate(tokens):
@@ -478,6 +506,9 @@ def _filter_aggressive(
             continue
 
         if _is_descriptive(normalized, group):
+            continue
+
+        if use_global and _is_globally_ubiquitous(normalized, iso3, global_idf):
             continue
 
         out.append(normalized)
@@ -512,6 +543,7 @@ def _filter_statistical(
     iso3: str,
     generic: frozenset[str],
     pos_tags: dict[str, str] | None = None,
+    global_idf: "GlobalIdfProvider | None" = None,
 ) -> list[str]:
     """TF-IDF word scoring instead of curated dictionaries (ported from Caveman C# 1.4.1).
 
@@ -521,7 +553,15 @@ def _filter_statistical(
     scoring at or above the median of the prompt's own positively-scored vocabulary, so
     the cut is relative to this text rather than a fixed threshold. Never drops a
     sentence to nothing.
+
+    When `global_idf` has a table for `iso3`, the local (single-prompt) IDF is blended
+    50/50 with the precomputed global document frequency — same smoothed-blend approach
+    as `synthelion.nlp.summarizer._tfidf_scores` — so word importance is grounded against
+    real-world rarity, not just how the word happens to be distributed within this one
+    prompt. Falls back to local-only IDF (today's exact behavior) when no table is
+    available for the language.
     """
+    use_global = global_idf is not None and global_idf.has_data(iso3)
     is_proper = _detect_proper_nouns(tokens, iso3, proper_nouns)
     n = len(tokens)
     sentence_of, sentence_count = _sentence_index_of(tokens)
@@ -554,11 +594,18 @@ def _filter_statistical(
             continue
 
         document_frequency = len(docs_with_term[word])
-        idf = (
+        local_idf = (
             math.log(sentence_count / (1 + document_frequency)) + 1.0
             if sentence_count > 1
             else 1.0
         )
+        if use_global:
+            g_df = global_idf.get_document_frequency(word, iso3)
+            g_n = global_idf.get_corpus_size(iso3)
+            global_component = math.log((g_n + 1) / (g_df + 1))
+            idf = 0.5 * local_idf + 0.5 * global_component
+        else:
+            idf = local_idf
         scores[word] = frequency * idf
 
     if not scores:

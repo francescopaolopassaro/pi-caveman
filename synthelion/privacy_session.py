@@ -89,8 +89,20 @@ class PrivacySession:
             return self._map.get(placeholder)
 
     def get_all(self) -> dict[str, PlaceholderEntry]:
+        """Returns every placeholder mapped to its `PlaceholderEntry`, which
+        includes `original_value` in cleartext. This is sensitive — callers
+        must not log, persist, or return this over a network response; it
+        defeats the entire purpose of masking. Use `summary()` instead
+        wherever only placeholder/category bookkeeping is needed."""
         with self._lock:
             return dict(self._map)
+
+    def summary(self) -> list[dict[str, str]]:
+        """Redacted view of the session: placeholder + category only, never
+        `original_value`. Safe to log, display, or return from an API/CLI
+        response — unlike `get_all()`/`to_json()`, which carry the real PII."""
+        with self._lock:
+            return [{"placeholder": k, "category": e.category} for k, e in self._map.items()]
 
     def merge_from(self, other: "PrivacySession") -> None:
         for entry in other.get_all().values():
@@ -106,6 +118,12 @@ class PrivacySession:
             self._counter = 0
 
     def to_json(self) -> str:
+        """Full-fidelity export INCLUDING cleartext `original_value` for every
+        placeholder — meant only for trusted cross-process session handoff
+        (e.g. persisting a session so a later process can `restore()` it).
+        Never expose this over an HTTP response, log it, or write it anywhere
+        an untrusted party could read it; use `summary()` for a safe, redacted
+        view instead."""
         with self._lock:
             entries = [
                 {"placeholder": k, "original_value": e.original_value, "category": e.category}

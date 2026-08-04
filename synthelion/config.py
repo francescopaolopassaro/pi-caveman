@@ -82,6 +82,48 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         # <=85 High, >85 Critical).
         "block_min_score": 61,
     },
+    "documents": {
+        # Master switch for the mask-document CLI/MCP-tool/dashboard endpoint.
+        "enabled": True,
+        # Reject files larger than this before reading them into memory —
+        # DOCX/XLSX in-place masking loads the full object model, so this is
+        # the main safety valve against an accidentally huge upload/path.
+        "max_file_size_mb": 200,
+        # Boundary-safety window for chunked/streaming masking (see
+        # synthelion/privacy_stream.py) — must stay >= the longest bounded PII
+        # pattern in privacy_rules.yaml (IBAN etc. top out well under 100).
+        "chunk_overlap_chars": 512,
+        # Masked output naming: "<stem><output_suffix><ext>", e.g.
+        # report.docx -> report.masked.docx. The original file is never
+        # overwritten.
+        "output_suffix": ".masked",
+        "supported_formats": ["pdf", "docx", "xlsx", "csv", "md", "txt"],
+    },
+    "enterprise_guard": {
+        # Master switch — outbound data-loss-prevention firewall (cloud/database/
+        # FTP/git credentials, private keys, bulk .env dumps, plus user-defined
+        # file "security zones" that must never be read into an agent's context).
+        # Distinct from `privacy.*` (PII, masked-and-continue) — EnterpriseGuard
+        # data has no safe redacted form, so it's always block-or-allow, never mask.
+        "enabled": True,
+        # Per-category toggles for check_text()'s content detectors.
+        "content_categories": {
+            "cloud_credentials": True,
+            "database_connections": True,
+            "ftp_credentials": True,
+            "git_credentials": True,
+            "private_keys": True,
+            "api_tokens": True,
+            "dotenv_bulk": True,
+        },
+        # User-defined fnmatch-style glob patterns (e.g. "**/fatture/**",
+        # "**/payroll/*.xlsx") — file paths an agent must never be allowed to
+        # read, checked by `synthelion firewall-check` (a PreToolUse hook) and
+        # by check_path()/check_tool_call(). Additive to the built-in defaults
+        # below unless use_default_blocked_paths is turned off.
+        "blocked_paths": [],
+        "use_default_blocked_paths": True,
+    },
     "waf": {
         # Master switch — set to False to disable request inspection entirely.
         "enabled": True,
@@ -368,6 +410,27 @@ def waf_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = config if config is not None else load_config()
     defaults = _DEFAULT_CONFIG["waf"]
     return {**defaults, **cfg.get("waf", {})}
+
+
+def enterprise_guard_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The effective `enterprise_guard.*` settings (outbound DLP content
+    categories, blocked file-path patterns) — see
+    `_DEFAULT_CONFIG["enterprise_guard"]` for defaults. `enterprise_guard.enabled
+    = False` disables the whole gate (content checks and path checks alike)."""
+    cfg = config if config is not None else load_config()
+    defaults = _DEFAULT_CONFIG["enterprise_guard"]
+    merged = {**defaults, **cfg.get("enterprise_guard", {})}
+    merged["content_categories"] = {**defaults["content_categories"], **cfg.get("enterprise_guard", {}).get("content_categories", {})}
+    return merged
+
+
+def documents_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The effective `documents.*` settings (mask-document file-size cap,
+    chunk-overlap window, masked-output naming) — see
+    `_DEFAULT_CONFIG["documents"]` for defaults."""
+    cfg = config if config is not None else load_config()
+    defaults = _DEFAULT_CONFIG["documents"]
+    return {**defaults, **cfg.get("documents", {})}
 
 
 def new_node_id() -> str:

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from typing import TYPE_CHECKING
 
 from synthelion.detector import LanguageDetector
 from synthelion.nlp.sentence_detector import SentenceDetector
 from synthelion.nlp.topic_segmenter import TopicSegmenter
 from synthelion.word_provider import FunctionWordProvider
+
+if TYPE_CHECKING:
+    from synthelion.global_idf_provider import GlobalIdfProvider
 
 _POSITION_FIRST = 1.5
 _POSITION_LAST = 1.2
@@ -21,7 +25,9 @@ def _tokenize(text: str, fw: frozenset[str]) -> list[str]:
     return [w for w in words if w not in fw and len(w) > 1]
 
 
-def _tfidf_scores(sentences: list[str], fw: frozenset[str]) -> list[float]:
+def _tfidf_scores(
+    sentences: list[str], fw: frozenset[str], iso3: str | None = None, global_idf: "GlobalIdfProvider | None" = None,
+) -> list[float]:
     n = len(sentences)
     tokenized = [_tokenize(s, fw) for s in sentences]
     df: Counter[str] = Counter()
@@ -29,16 +35,30 @@ def _tfidf_scores(sentences: list[str], fw: frozenset[str]) -> list[float]:
         for w in set(words):
             df[w] += 1
 
+    use_global = global_idf is not None and iso3 is not None and global_idf.has_data(iso3)
+
     scores = []
     for i, words in enumerate(tokenized):
         if not words:
             scores.append(0.0)
             continue
         tf = Counter(words)
-        score = sum(
-            (tf[w] / len(words)) * math.log((n + 1) / (df[w] + 1))
-            for w in tf
-        )
+        score = 0.0
+        for w in tf:
+            local_idf = math.log((n + 1) / (df[w] + 1))
+            if use_global:
+                g_df = global_idf.get_document_frequency(w, iso3)
+                g_n = global_idf.get_corpus_size(iso3)
+                # Simple smoothed blend: local IDF alone is unstable on short/
+                # jargon-heavy documents (few sentences -> few data points),
+                # so it's averaged 50/50 with the precomputed global reference
+                # when one is available for the language. Falls back to
+                # local-only (today's exact behavior) otherwise.
+                global_component = math.log((g_n + 1) / (g_df + 1))
+                idf = 0.5 * local_idf + 0.5 * global_component
+            else:
+                idf = local_idf
+            score += (tf[w] / len(words)) * idf
         # Position bias
         pos_factor = (
             _POSITION_FIRST if i == 0 else
@@ -131,11 +151,14 @@ class TfIdfSummarizer:
     Ported from C# CavemanSummarizer. Best for factual/report text.
     """
 
-    def __init__(self, word_provider: FunctionWordProvider | None = None) -> None:
+    def __init__(
+        self, word_provider: FunctionWordProvider | None = None, global_idf: "GlobalIdfProvider | None" = None,
+    ) -> None:
         self._provider = word_provider or FunctionWordProvider()
         self._detector = LanguageDetector(self._provider)
         self._splitter = SentenceDetector(self._provider)
         self._topic_segmenter = TopicSegmenter(self._provider)
+        self._global_idf = global_idf
 
     def summarize(
         self,
@@ -163,7 +186,7 @@ class TfIdfSummarizer:
         if len(sentences) <= k:
             return text
 
-        scores = _tfidf_scores(sentences, fw)
+        scores = _tfidf_scores(sentences, fw, iso3=lang, global_idf=self._global_idf)
         selected = _mmr_select(sentences, scores, fw, k)
         return " ".join(selected)
 
@@ -220,7 +243,7 @@ class TfIdfSummarizer:
             seg_sentences = sentences[segment.start_sentence:segment.end_sentence]
             if not seg_sentences:
                 continue
-            scores = _tfidf_scores(seg_sentences, fw)
+            scores = _tfidf_scores(seg_sentences, fw, iso3=lang, global_idf=self._global_idf)
             local_indexes = _mmr_select_indices(seg_sentences, scores, fw, min(seg_budget, len(seg_sentences)))
             for local_idx in local_indexes:
                 selected_indexes.add(segment.start_sentence + local_idx)

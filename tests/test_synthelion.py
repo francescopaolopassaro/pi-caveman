@@ -546,6 +546,187 @@ class TestSummarizers:
         assert result
 
 
+class TestGlobalIdfBlend:
+    """1.2.5: _tfidf_scores can optionally blend a precomputed global IDF
+    table with the existing local (document-only) IDF. Omitting global_idf
+    (or a language with no shipped table) must reproduce pre-1.2.5 scores
+    exactly — this is the regression guard for the fallback path."""
+
+    def test_local_only_matches_pre_1_2_5_behavior_without_global_idf(self):
+        from synthelion.nlp.summarizer import _tfidf_scores
+        fw = frozenset({"the", "a", "is"})
+        sentences = ["the cat sat", "a rare quantum computer appeared"]
+        assert _tfidf_scores(sentences, fw) == _tfidf_scores(sentences, fw, iso3="eng", global_idf=None)
+
+    def test_blend_changes_scores_when_global_idf_available(self):
+        from synthelion.nlp.summarizer import _tfidf_scores
+        fw = frozenset({"the", "a", "is"})
+        sentences = ["the cat sat on the mat", "a rare quantum computer appeared"]
+
+        class FakeGlobalIdf:
+            def has_data(self, iso3):
+                return True
+
+            def get_corpus_size(self, iso3):
+                return 1_000_000
+
+            def get_document_frequency(self, lemma, iso3):
+                return {"cat": 500_000, "quantum": 50}.get(lemma, 1000)
+
+        local_scores = _tfidf_scores(sentences, fw)
+        blended_scores = _tfidf_scores(sentences, fw, iso3="eng", global_idf=FakeGlobalIdf())
+        assert blended_scores != local_scores
+
+    def test_missing_language_table_falls_back_to_local_only(self):
+        from synthelion.nlp.summarizer import _tfidf_scores
+        fw = frozenset({"the", "a"})
+        sentences = ["the cat sat", "a dog ran"]
+
+        class NoDataGlobalIdf:
+            def has_data(self, iso3):
+                return False
+
+            def get_corpus_size(self, iso3):
+                return 0
+
+            def get_document_frequency(self, lemma, iso3):
+                return 0
+
+        local_scores = _tfidf_scores(sentences, fw)
+        with_missing_table = _tfidf_scores(sentences, fw, iso3="xxx", global_idf=NoDataGlobalIdf())
+        assert local_scores == with_missing_table
+
+
+class _FakeGlobalIdf:
+    """Deterministic stand-in for GlobalIdfProvider: 'the'/'a'/'rare'-style words
+    are globally ubiquitous, 'quantum'/'anarchism'-style words are globally rare."""
+
+    def __init__(self, ubiquitous: frozenset[str] = frozenset(), corpus_size: int = 1_000_000):
+        self._ubiquitous = ubiquitous
+        self._corpus_size = corpus_size
+
+    def has_data(self, iso3):
+        return True
+
+    def get_corpus_size(self, iso3):
+        return self._corpus_size
+
+    def get_document_frequency(self, lemma, iso3):
+        if lemma in self._ubiquitous:
+            return int(self._corpus_size * 0.9)
+        return 10
+
+
+class _NoDataGlobalIdf:
+    def has_data(self, iso3):
+        return False
+
+    def get_corpus_size(self, iso3):
+        return 0
+
+    def get_document_frequency(self, lemma, iso3):
+        return 0
+
+
+class TestCompressionServiceGlobalIdf:
+    """1.2.5: CompressionService's STATISTICAL and AGGRESSIVE levels can optionally
+    blend/consult a precomputed global IDF table. Omitting global_idf (or a
+    language with no shipped table) must reproduce the exact pre-wiring
+    behavior — this is the regression guard for the fallback path."""
+
+    def test_statistical_local_only_matches_no_global_idf(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "The quick brown fox jumps over the lazy dog. A rare quantum computer appeared yesterday."
+        svc_default = CompressionService()
+        svc_explicit_none = CompressionService(global_idf=None)
+        r1 = svc_default.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        r2 = svc_explicit_none.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        assert r1.compressed_text == r2.compressed_text
+
+    def test_statistical_blend_changes_output_when_global_idf_available(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "The quick brown fox jumps over the lazy dog. A rare quantum computer appeared yesterday."
+        svc_local = CompressionService()
+        svc_global = CompressionService(global_idf=_FakeGlobalIdf(ubiquitous=frozenset({"fox", "dog"})))
+        r_local = svc_local.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        r_global = svc_global.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        assert r_local.compressed_text != r_global.compressed_text
+
+    def test_statistical_missing_language_table_falls_back_to_local_only(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "The quick brown fox jumps over the lazy dog. A rare quantum computer appeared yesterday."
+        svc_local = CompressionService()
+        svc_no_data = CompressionService(global_idf=_NoDataGlobalIdf())
+        r_local = svc_local.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        r_no_data = svc_no_data.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        assert r_local.compressed_text == r_no_data.compressed_text
+
+    def test_statistical_never_empties_a_sentence_with_global_idf(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "Ok."
+        svc_global = CompressionService(global_idf=_FakeGlobalIdf(ubiquitous=frozenset({"ok"})))
+        r = svc_global.compress(text, CompressionLevel.STATISTICAL, iso3="eng")
+        assert r.compressed_text.strip()
+
+    def test_aggressive_local_only_matches_no_global_idf(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "The quick brown fox jumps over the lazy dog near the riverbank."
+        svc_default = CompressionService()
+        svc_explicit_none = CompressionService(global_idf=None)
+        r1 = svc_default.compress(text, CompressionLevel.AGGRESSIVE, iso3="eng")
+        r2 = svc_explicit_none.compress(text, CompressionLevel.AGGRESSIVE, iso3="eng")
+        assert r1.compressed_text == r2.compressed_text
+
+    def test_aggressive_drops_globally_ubiquitous_word_not_on_curated_lists(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "The quick brown fox jumps over the lazy riverbank dog."
+        svc_local = CompressionService()
+        r_local = svc_local.compress(text, CompressionLevel.AGGRESSIVE, iso3="eng")
+        assert "fox" in r_local.compressed_text.split()
+
+        svc_global = CompressionService(global_idf=_FakeGlobalIdf(ubiquitous=frozenset({"fox"})))
+        r_global = svc_global.compress(text, CompressionLevel.AGGRESSIVE, iso3="eng")
+        assert "fox" not in r_global.compressed_text.split()
+
+    def test_aggressive_never_empties_output_via_global_idf(self):
+        from synthelion.core import CompressionService
+        from synthelion.models import CompressionLevel
+        text = "Go."
+        svc_global = CompressionService(global_idf=_FakeGlobalIdf(ubiquitous=frozenset({"go"})))
+        r = svc_global.compress(text, CompressionLevel.AGGRESSIVE, iso3="eng")
+        assert r.compressed_text.strip()
+
+
+class TestGlobalIdfProviderPreload:
+    """1.2.5: GlobalIdfProvider.preload() warms the class-level cache ahead of
+    the first real request, without changing lookup results."""
+
+    def test_preload_specific_language_populates_cache_synchronously(self):
+        from synthelion.global_idf_provider import GlobalIdfProvider
+        GlobalIdfProvider._cache.pop("eng", None)
+        GlobalIdfProvider.preload(["eng"], background=False)
+        assert "eng" in GlobalIdfProvider._cache
+
+    def test_preload_background_thread_eventually_populates_cache(self):
+        from synthelion.global_idf_provider import GlobalIdfProvider
+        GlobalIdfProvider._cache.pop("eng", None)
+        thread = GlobalIdfProvider.preload(["eng"], background=True)
+        assert thread is not None
+        thread.join(timeout=10)
+        assert "eng" in GlobalIdfProvider._cache
+
+    def test_preload_unknown_language_does_not_raise(self):
+        from synthelion.global_idf_provider import GlobalIdfProvider
+        GlobalIdfProvider.preload(["xxx-not-a-real-language"], background=False)
+        assert GlobalIdfProvider().has_data("xxx-not-a-real-language") is False
+
+
 # ---------------------------------------------------------------------------
 # 7. ContextWindow
 # ---------------------------------------------------------------------------

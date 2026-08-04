@@ -247,6 +247,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._serve_json(self._cluster_action())
             elif path == "/api/privacy-test":
                 self._serve_json(self._privacy_test())
+            elif path == "/api/documents/mask":
+                self._serve_json(self._documents_mask())
             elif path == "/api/waf/ip-rules":
                 self._serve_json(self._waf_add_ip_rule())
             elif path == "/api/waf/ip-rules/delete":
@@ -408,6 +410,101 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 "is_clean": injection.is_clean,
             },
         }
+
+    def _documents_mask(self) -> dict:
+        """Mask PII in an uploaded document (PDF/Word/Excel/CSV/Markdown/text).
+        No multipart-upload precedent exists in this handler, so — consistent
+        with every other endpoint here — the file travels as base64 inside the
+        same JSON-body convention `_read_json_body` already uses everywhere
+        else, rather than adding raw multipart parsing from scratch. Intended
+        for the local, single-operator admin dashboard use case; respects
+        `documents.max_file_size_mb`."""
+        import base64
+        import os
+        import tempfile
+
+        from synthelion.config import documents_config, privacy_config
+        from synthelion.privacy_analyzer import PrivacyAnalyzer
+        from synthelion.privacy_session import PrivacySession
+        from synthelion import document_extractor as de
+
+        body = self._read_json_body()
+        filename = body.get("filename") or "upload.txt"
+        content_b64 = body.get("content_base64")
+        if not content_b64:
+            return {"error": "content_base64 is required"}
+        try:
+            raw = base64.b64decode(content_b64)
+        except Exception:
+            return {"error": "content_base64 is not valid base64"}
+
+        dcfg = documents_config()
+        max_bytes = dcfg["max_file_size_mb"] * 1024 * 1024
+        if len(raw) > max_bytes:
+            return {"error": f"File is {len(raw) / (1024 * 1024):.1f} MB, exceeds documents.max_file_size_mb ({dcfg['max_file_size_mb']})"}
+
+        pcfg = privacy_config()
+        language = body.get("language") or pcfg.get("language", "en")
+        suffix = Path(filename).suffix
+        fmt = de.detect_format(filename)
+
+        analyzer = PrivacyAnalyzer()
+        if pcfg.get("whitelist"):
+            analyzer.add_to_whitelist(*pcfg["whitelist"])
+        session = PrivacySession()
+
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_in:
+            tmp_in.write(raw)
+            in_path = tmp_in.name
+
+        stem = Path(filename).stem
+        masked_name = f"{stem}{dcfg['output_suffix']}{suffix}"
+        out_fd, out_path = tempfile.mkstemp(suffix=suffix)
+        os.close(out_fd)
+
+        try:
+            if fmt == "docx":
+                doc = de.load_docx(in_path)
+                de.mask_docx_in_place(doc, analyzer, session, language)
+                doc.save(out_path)
+                with open(out_path, "rb") as f:
+                    masked_content_b64 = base64.b64encode(f.read()).decode("ascii")
+                result: dict = {"masked_content_base64": masked_content_b64, "filename": masked_name}
+            elif fmt == "xlsx":
+                wb = de.load_xlsx(in_path)
+                de.mask_xlsx_in_place(wb, analyzer, session, language)
+                wb.save(out_path)
+                with open(out_path, "rb") as f:
+                    masked_content_b64 = base64.b64encode(f.read()).decode("ascii")
+                result = {"masked_content_base64": masked_content_b64, "filename": masked_name}
+            else:
+                from synthelion.privacy_stream import PrivacyStreamMasker
+                masker = PrivacyStreamMasker(
+                    analyzer=analyzer, session=session, language=language, overlap_chars=dcfg["chunk_overlap_chars"],
+                )
+                if fmt == "pdf":
+                    chunks = de.extract_pdf_text(in_path)
+                elif fmt == "csv":
+                    chunks = de.extract_csv_rows(in_path)
+                else:
+                    chunks = de.extract_text_chunks(in_path)
+                parts = [masker.feed(chunk) for chunk in chunks]
+                parts.append(masker.flush())
+                result = {"masked_text": "".join(parts)}
+        except ImportError as exc:
+            return {"error": str(exc)}
+        finally:
+            for p in (in_path, out_path):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+        # Redacted summary only (placeholder + category), never original values.
+        new_entries = session.summary()
+        result["masked_count"] = len(new_entries)
+        result["detected_categories"] = sorted({e["category"] for e in new_entries})
+        return result
 
     @staticmethod
     def _waf_events(qs: dict) -> dict:
