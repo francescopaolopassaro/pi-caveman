@@ -4,7 +4,7 @@ All notable changes to Synthelion are documented here.
 
 ---
 
-## [Unreleased]
+## [1.2.5] — 2026-08-03
 
 ### Added — EnterpriseGuard (outbound data-loss-prevention firewall)
 - **`synthelion/enterprise_guard.py`** (`EnterpriseGuard`) — a hard block-or-allow firewall, distinct from PrivacyGuard (PII, masked-and-continue) and the WAF (inbound HTTP request inspection). Covers two independent things:
@@ -22,7 +22,7 @@ All notable changes to Synthelion are documented here.
 
 ---
 
-## [1.2.5] — 2026-08-03
+
 
 ### Added — PII masking on streams and documents
 - **`synthelion mask-document`** (CLI), **`mask_document`** (MCP/OpenAI-function tool), and **`POST /api/documents/mask`** (dashboard) — mask PII in PDF, Word (.docx), Excel (.xlsx), CSV, Markdown, and plain-text files, not just raw strings. PDF/CSV/Markdown/plain-text return masked text; DOCX/XLSX are edited in-place (paragraphs, table cells, headers/footers for DOCX; every string cell for XLSX) and written to a new `<name>.masked.<ext>` copy — the original file is never overwritten. Requires the new optional `synthelion[documents]` extra (`pypdf`, `python-docx`, `openpyxl`); CSV/Markdown/plain-text need nothing beyond the stdlib.
