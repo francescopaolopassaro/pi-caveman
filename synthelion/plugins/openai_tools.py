@@ -1043,7 +1043,7 @@ def execute_tool(name: str, arguments: dict) -> dict:
         # Checked against the ORIGINAL (pre-privacy-masking) text — see cli.py's
         # identical comment for why (masking can break a secret's regex shape).
         from synthelion.enterprise_guard import EnterpriseGuard, EnterpriseGuardBlockedError
-        eg_result = EnterpriseGuard().check_text(_original_text)
+        eg_result = EnterpriseGuard().check_text(_original_text, source="mcp")
         if eg_result.blocked:
             raise EnterpriseGuardBlockedError(eg_result)
 

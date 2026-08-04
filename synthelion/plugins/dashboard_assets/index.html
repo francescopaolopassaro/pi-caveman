@@ -1637,6 +1637,95 @@
           </div>
         </div>
       </div>
+
+      <div class="row g-3 mb-4">
+        <div class="col-12">
+          <div class="card card-plain">
+            <div class="card-header pb-0">
+              <h6 class="mb-0">EnterpriseGuard</h6>
+              <p class="text-sm mb-0 text-secondary">Outbound data-loss-prevention firewall — blocks cloud/database/FTP/git credentials, private keys and bulk .env dumps before they reach a model, and lets you define file "security zones" that must never be read into an agent's context (enforced via a PreToolUse hook, <code>synthelion firewall-check</code>). Distinct from PrivacyGuard: this data has no safe redacted form, so it is always block-or-allow, never masked.</p>
+            </div>
+            <div class="card-body">
+              <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" role="switch" id="eg-enabled">
+                <label class="form-check-label text-sm" for="eg-enabled">Enabled (master switch)</label>
+              </div>
+              <p class="text-sm text-secondary mb-2">Content categories (outbound text scanning):</p>
+              <div class="row mb-3">
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-cloud_credentials">
+                  <label class="form-check-label text-sm" for="eg-cat-cloud_credentials">Cloud credentials (AWS/Azure/GCP)</label>
+                </div>
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-database_connections">
+                  <label class="form-check-label text-sm" for="eg-cat-database_connections">Database connection strings</label>
+                </div>
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-ftp_credentials">
+                  <label class="form-check-label text-sm" for="eg-cat-ftp_credentials">FTP/SFTP credentials</label>
+                </div>
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-git_credentials">
+                  <label class="form-check-label text-sm" for="eg-cat-git_credentials">Git remote credentials</label>
+                </div>
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-private_keys">
+                  <label class="form-check-label text-sm" for="eg-cat-private_keys">Private keys (PEM)</label>
+                </div>
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-api_tokens">
+                  <label class="form-check-label text-sm" for="eg-cat-api_tokens">API tokens (GitHub/Slack/Bearer)</label>
+                </div>
+                <div class="col-md-4 form-check form-switch">
+                  <input class="form-check-input" type="checkbox" role="switch" id="eg-cat-dotenv_bulk">
+                  <label class="form-check-label text-sm" for="eg-cat-dotenv_bulk">Bulk .env dumps</label>
+                </div>
+              </div>
+              <div class="form-check form-switch mb-2">
+                <input class="form-check-input" type="checkbox" role="switch" id="eg-use-defaults">
+                <label class="form-check-label text-sm" for="eg-use-defaults">Include built-in default protected paths (.env, .git/config, .ssh keys, cloud-credential files, ...)</label>
+              </div>
+              <label class="form-label text-sm mt-2">Protected security-zone paths (one glob pattern per line, e.g. <code>**/fatture/**</code>, <code>**/payroll/*.xlsx</code>)</label>
+              <textarea class="form-control mb-3" id="eg-blocked-paths" rows="3" placeholder="**/fatture/**&#10;**/payroll/*.xlsx&#10;**/database.yml"></textarea>
+              <button type="button" class="btn bg-gradient-info mb-0" id="eg-save-btn">Save settings</button>
+              <span class="text-sm ms-2" id="eg-save-status"></span>
+
+              <hr class="my-4">
+              <h6 class="mb-0">Live tester</h6>
+              <p class="text-sm mb-2 text-secondary">Check a text snippet and/or a file path against EnterpriseGuard — nothing submitted here is stored.</p>
+              <div class="row">
+                <div class="col-md-6">
+                  <textarea class="form-control mb-2" id="eg-test-text" rows="2" placeholder="Paste text to check, e.g. a connection string"></textarea>
+                </div>
+                <div class="col-md-6">
+                  <input type="text" class="form-control mb-2" id="eg-test-path" placeholder="File path to check, e.g. /home/user/.env">
+                </div>
+              </div>
+              <button type="button" class="btn bg-gradient-dark mb-0" id="eg-test-btn">Test</button>
+              <div id="eg-test-result" class="mt-3"></div>
+
+              <hr class="my-4">
+              <h6 class="mb-0">Recent blocks</h6>
+              <p class="text-sm mb-0 text-secondary">Metadata only (category/rule/source/time) — the actual blocked text or path is never logged.</p>
+              <div class="table-responsive mt-2">
+                <table class="table align-items-center mb-0">
+                  <thead>
+                    <tr>
+                      <th class="text-xs text-secondary text-uppercase">Time</th>
+                      <th class="text-xs text-secondary text-uppercase">Source</th>
+                      <th class="text-xs text-secondary text-uppercase">Category</th>
+                      <th class="text-xs text-secondary text-uppercase">Rule</th>
+                    </tr>
+                  </thead>
+                  <tbody id="eg-events-body">
+                    <tr><td colspan="4" class="text-sm text-secondary">No blocks yet.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       </div>
       </section>
 

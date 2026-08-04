@@ -352,6 +352,66 @@ class TestDashboardWafApi:
         body = json.loads(resp.read())
         assert body["events"] == []
 
+
+class TestDashboardEnterpriseGuardApi:
+    @pytest.fixture(autouse=True)
+    def _clear_events(self):
+        from synthelion.enterprise_guard import _recent_blocks
+        _recent_blocks.clear()
+        yield
+        _recent_blocks.clear()
+
+    def test_test_endpoint_requires_auth(self, dashboard_server):
+        resp = _post_json(dashboard_server, "/api/enterprise-guard-test", {"text": "hello"})
+        resp.read()
+        assert resp.status == 401
+
+    def test_events_requires_auth(self, dashboard_server):
+        resp = _get(dashboard_server, "/api/enterprise-guard/events")
+        resp.read()
+        assert resp.status == 401
+
+    def test_test_endpoint_detects_credential(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(dashboard_server, "/api/enterprise-guard-test", {"text": "AKIAIOSFODNN7EXAMPLE"}, cookie)
+        body = json.loads(resp.read())
+        assert body["text_result"]["blocked"] is True
+        assert body["text_result"]["category"] == "cloud_credentials"
+
+    def test_test_endpoint_detects_blocked_path(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(dashboard_server, "/api/enterprise-guard-test", {"path": "/home/user/.env"}, cookie)
+        body = json.loads(resp.read())
+        assert body["path_result"]["blocked"] is True
+
+    def test_test_endpoint_clean_input(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(dashboard_server, "/api/enterprise-guard-test", {"text": "hello there"}, cookie)
+        body = json.loads(resp.read())
+        assert body["text_result"]["blocked"] is False
+
+    def test_test_endpoint_never_persists_to_events_log(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        _post_json(dashboard_server, "/api/enterprise-guard-test", {"text": "AKIAIOSFODNN7EXAMPLE"}, cookie).read()
+        resp = _get(dashboard_server, "/api/enterprise-guard/events", cookie)
+        body = json.loads(resp.read())
+        assert body["events"] == []
+
+    def test_events_empty_by_default(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _get(dashboard_server, "/api/enterprise-guard/events", cookie)
+        body = json.loads(resp.read())
+        assert body["events"] == []
+
+    def test_events_reflects_real_blocks(self, dashboard_server):
+        from synthelion.enterprise_guard import EnterpriseGuard
+        EnterpriseGuard().check_text("AKIAIOSFODNN7EXAMPLE", source="cli")
+        cookie = _login(dashboard_server)
+        resp = _get(dashboard_server, "/api/enterprise-guard/events", cookie)
+        body = json.loads(resp.read())
+        assert len(body["events"]) == 1
+        assert body["events"][0]["source"] == "cli"
+
     def test_detect_only_by_default_never_blocks_malicious_request(self, dashboard_server):
         # block_mode defaults to False — a malicious-looking request must still
         # reach normal routing (redirect to login), not get a 403.

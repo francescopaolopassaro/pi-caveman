@@ -176,6 +176,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 from synthelion.cluster import render_k8s_manifest
                 nodes = int(qs.get("nodes", ["2"])[0])
                 self._serve_text(render_k8s_manifest(nodes), "synthelion-cluster.k8s.yaml")
+            elif path == "/api/enterprise-guard/events":
+                self._serve_json(self._enterprise_guard_events(qs))
             elif path == "/api/waf/events":
                 self._serve_json(self._waf_events(qs))
             elif path == "/api/waf/ip-rules":
@@ -247,6 +249,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._serve_json(self._cluster_action())
             elif path == "/api/privacy-test":
                 self._serve_json(self._privacy_test())
+            elif path == "/api/enterprise-guard-test":
+                self._serve_json(self._enterprise_guard_test())
             elif path == "/api/documents/mask":
                 self._serve_json(self._documents_mask())
             elif path == "/api/waf/ip-rules":
@@ -505,6 +509,39 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         result["masked_count"] = len(new_entries)
         result["detected_categories"] = sorted({e["category"] for e in new_entries})
         return result
+
+    @staticmethod
+    def _enterprise_guard_events(qs: dict) -> dict:
+        from synthelion.enterprise_guard import recent_blocks
+
+        limit = int(qs.get("limit", [100])[0])
+        return {"events": recent_blocks(limit=limit)}
+
+    def _enterprise_guard_test(self) -> dict:
+        """Live EnterpriseGuard tester for the Security page — checks submitted
+        text and/or path without persisting either. Distinct from the
+        recent-blocks log: a manual test here is never recorded as a real
+        block event."""
+        from synthelion.enterprise_guard import EnterpriseGuard
+
+        body = self._read_json_body()
+        text = body.get("text") or ""
+        path = body.get("path") or ""
+        guard = EnterpriseGuard()
+
+        text_result = guard._check_text(text) if text else None
+        path_result = guard._check_path(path) if path else None
+
+        return {
+            "text_result": None if text_result is None else {
+                "blocked": text_result.blocked, "category": text_result.category,
+                "rule_name": text_result.rule_name, "reason": text_result.reason,
+            },
+            "path_result": None if path_result is None else {
+                "blocked": path_result.blocked, "category": path_result.category,
+                "rule_name": path_result.rule_name, "reason": path_result.reason,
+            },
+        }
 
     @staticmethod
     def _waf_events(qs: dict) -> dict:

@@ -241,7 +241,7 @@ def _process_text(text: str, pcfg: dict, level_override: str | None = None, ccr:
     # Checked against the ORIGINAL (pre-privacy-masking) text — see cli.py's
     # identical comment for why (masking can break a secret's regex shape).
     from synthelion.enterprise_guard import EnterpriseGuard
-    eg_result = EnterpriseGuard().check_text(original_text)
+    eg_result = EnterpriseGuard().check_text(original_text, source="proxy")
     if eg_result.blocked:
         raise _Blocked(eg_result.reason)
 

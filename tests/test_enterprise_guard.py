@@ -234,6 +234,59 @@ class TestConfigIntegration:
         assert guard.check_text("AKIAIOSFODNN7EXAMPLE").blocked is True
 
 
+class TestRecentBlocksRecorder:
+    """In-memory recent-blocks log for dashboard visibility — never stores
+    the triggering text/path, only category/rule/source/timestamp."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_events(self):
+        from synthelion.enterprise_guard import _recent_blocks
+        _recent_blocks.clear()
+        yield
+        _recent_blocks.clear()
+
+    def test_blocked_check_text_is_recorded(self):
+        from synthelion.enterprise_guard import recent_blocks
+        _guard().check_text("AKIAIOSFODNN7EXAMPLE", source="cli")
+        events = recent_blocks()
+        assert len(events) == 1
+        assert events[0]["category"] == "cloud_credentials"
+        assert events[0]["source"] == "cli"
+        assert "timestamp" in events[0]
+
+    def test_allowed_check_text_is_not_recorded(self):
+        from synthelion.enterprise_guard import recent_blocks
+        _guard().check_text("just an ordinary sentence", source="cli")
+        assert recent_blocks() == []
+
+    def test_recorded_event_never_contains_the_triggering_text(self):
+        from synthelion.enterprise_guard import recent_blocks
+        secret = "AKIAIOSFODNN7EXAMPLE"
+        _guard().check_text(secret, source="cli")
+        event = recent_blocks()[0]
+        assert secret not in json.dumps(event)
+
+    def test_blocked_path_is_recorded_with_source(self):
+        from synthelion.enterprise_guard import recent_blocks
+        _guard().check_path("/home/user/.env", source="proxy")
+        events = recent_blocks()
+        assert len(events) == 1
+        assert events[0]["source"] == "proxy"
+
+    def test_blocked_tool_call_is_recorded(self):
+        from synthelion.enterprise_guard import recent_blocks
+        _guard().check_tool_call("Read", {"file_path": "/home/user/.ssh/id_rsa"})
+        events = recent_blocks()
+        assert len(events) == 1
+        assert events[0]["source"] == "firewall-check"
+
+    def test_limit_caps_returned_events(self):
+        from synthelion.enterprise_guard import recent_blocks
+        for _ in range(5):
+            _guard().check_text("AKIAIOSFODNN7EXAMPLE")
+        assert len(recent_blocks(limit=2)) == 2
+
+
 class TestFirewallCheckCli:
     """`synthelion firewall-check` — the PreToolUse-hookable CLI command,
     mirroring `loop-check`'s exit-code contract (0 = allow, 2 = block)."""

@@ -411,7 +411,7 @@ def _cmd_compress(args) -> None:
     # [PG_n] placeholder, which would break EnterpriseGuard's shape match and
     # let a real secret slip through as a false negative.
     from synthelion.enterprise_guard import EnterpriseGuard
-    eg_result = EnterpriseGuard().check_text(_original_text)
+    eg_result = EnterpriseGuard().check_text(_original_text, source="cli")
 
     from synthelion.global_idf_provider import GlobalIdfProvider
     svc = CompressionService(global_idf=GlobalIdfProvider())

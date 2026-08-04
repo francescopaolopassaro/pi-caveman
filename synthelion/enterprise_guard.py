@@ -33,6 +33,9 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import threading
+import time
+from collections import deque
 from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
@@ -150,6 +153,35 @@ class GuardResult:
     reason: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# In-memory recent-blocks log — for dashboard visibility only. Deliberately
+# never stores the triggering text/path (only category/rule/source/time), so
+# it can't itself become a place a secret ends up persisted. Process-lifetime
+# only, not written to disk — same reasoning as other in-process-only state
+# in this project (e.g. dashboard session tokens), and appropriate here since
+# this is operational visibility, not a compliance audit trail.
+# ---------------------------------------------------------------------------
+
+_EVENTS_CAP = 500
+_events_lock = threading.Lock()
+_recent_blocks: "deque[dict]" = deque(maxlen=_EVENTS_CAP)
+
+
+def _record_block(result: GuardResult, source: str) -> None:
+    with _events_lock:
+        _recent_blocks.appendleft({
+            "timestamp": time.time(),
+            "category": result.category,
+            "rule_name": result.rule_name,
+            "source": source,
+        })
+
+
+def recent_blocks(limit: int = 100) -> list[dict]:
+    with _events_lock:
+        return list(_recent_blocks)[:limit]
+
+
 class EnterpriseGuard:
     """Stateless-per-config gate — construct with the effective
     `enterprise_guard.*` config (see `synthelion.config.enterprise_guard_config`)
@@ -170,7 +202,13 @@ class EnterpriseGuard:
 
     # -- content ---------------------------------------------------------
 
-    def check_text(self, text: str) -> GuardResult:
+    def check_text(self, text: str, source: str = "unknown") -> GuardResult:
+        result = self._check_text(text)
+        if result.blocked:
+            _record_block(result, source)
+        return result
+
+    def _check_text(self, text: str) -> GuardResult:
         if not self.enabled or not text:
             return GuardResult(blocked=False)
         scan = text[:_SCAN_CAP_BYTES]
@@ -191,7 +229,13 @@ class EnterpriseGuard:
 
     # -- filesystem paths --------------------------------------------------
 
-    def check_path(self, path: str) -> GuardResult:
+    def check_path(self, path: str, source: str = "unknown") -> GuardResult:
+        result = self._check_path(path)
+        if result.blocked:
+            _record_block(result, source)
+        return result
+
+    def _check_path(self, path: str) -> GuardResult:
         if not self.enabled or not path:
             return GuardResult(blocked=False)
         normalized = path.replace("\\", "/")
@@ -204,7 +248,7 @@ class EnterpriseGuard:
                 )
         return GuardResult(blocked=False)
 
-    def check_tool_call(self, tool_name: str, tool_input: "dict") -> GuardResult:
+    def check_tool_call(self, tool_name: str, tool_input: "dict", source: str = "firewall-check") -> GuardResult:
         """PreToolUse-style check: inspects a tool call's arguments for a
         blocked file path (Read/Edit/Write/Glob-shaped tools) or, for a shell
         tool (Bash-shaped), scans the raw command string for both blocked
@@ -216,8 +260,9 @@ class EnterpriseGuard:
         for arg_name in self._PATH_ARG_NAMES:
             value = tool_input.get(arg_name)
             if isinstance(value, str) and value:
-                result = self.check_path(value)
+                result = self._check_path(value)
                 if result.blocked:
+                    _record_block(result, source)
                     return result
 
         command = tool_input.get("command")
@@ -233,18 +278,22 @@ class EnterpriseGuard:
                 for token in re.split(r"\s+", normalized):
                     token = token.strip("'\"")
                     if fnmatch.fnmatch(token, pattern) or fnmatch.fnmatch(token.rsplit("/", 1)[-1], pattern):
-                        return GuardResult(
+                        result = GuardResult(
                             blocked=True, category="blocked_path", rule_name=pattern,
                             reason=f"Blocked: command references a protected security-zone path (matches '{pattern}').",
                         )
-            content_result = self.check_text(command)
+                        _record_block(result, source)
+                        return result
+            content_result = self._check_text(command)
             if content_result.blocked:
+                _record_block(content_result, source)
                 return content_result
 
         text = tool_input.get("text") or tool_input.get("content")
         if isinstance(text, str) and text:
-            content_result = self.check_text(text)
+            content_result = self._check_text(text)
             if content_result.blocked:
+                _record_block(content_result, source)
                 return content_result
 
         return GuardResult(blocked=False)

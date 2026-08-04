@@ -653,6 +653,110 @@
     }
   }
 
+  // ── EnterpriseGuard (outbound DLP firewall) ─────────────────────────────────
+
+  const EG_CATEGORIES = [
+    "cloud_credentials", "database_connections", "ftp_credentials",
+    "git_credentials", "private_keys", "api_tokens", "dotenv_bulk",
+  ];
+
+  async function loadEnterpriseGuardSettings() {
+    try {
+      const { config } = await fetchJson("/api/config");
+      const eg = config.enterprise_guard || {};
+      document.getElementById("eg-enabled").checked = eg.enabled !== false;
+      document.getElementById("eg-use-defaults").checked = eg.use_default_blocked_paths !== false;
+      const cats = eg.content_categories || {};
+      EG_CATEGORIES.forEach((c) => {
+        const el = document.getElementById("eg-cat-" + c);
+        if (el) el.checked = cats[c] !== false;
+      });
+      document.getElementById("eg-blocked-paths").value = (eg.blocked_paths || []).join("\n");
+    } catch (err) {
+      // non-critical — form just keeps its blank/default values
+    }
+  }
+
+  async function saveEnterpriseGuardSettings() {
+    const btn = document.getElementById("eg-save-btn");
+    const status = document.getElementById("eg-save-status");
+    btn.disabled = true;
+    status.textContent = "Saving…";
+    status.className = "text-sm text-secondary";
+    const content_categories = {};
+    EG_CATEGORIES.forEach((c) => {
+      const el = document.getElementById("eg-cat-" + c);
+      if (el) content_categories[c] = el.checked;
+    });
+    const payload = {
+      enterprise_guard: {
+        enabled: document.getElementById("eg-enabled").checked,
+        use_default_blocked_paths: document.getElementById("eg-use-defaults").checked,
+        content_categories,
+        blocked_paths: document.getElementById("eg-blocked-paths").value
+          .split("\n").map((s) => s.trim()).filter(Boolean),
+      },
+    };
+    try {
+      await postJson("/api/config", payload);
+      status.textContent = "Saved.";
+      status.className = "text-sm text-success";
+    } catch (err) {
+      status.textContent = "Error: " + err.message;
+      status.className = "text-sm text-danger";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById("eg-save-btn").addEventListener("click", saveEnterpriseGuardSettings);
+
+  document.getElementById("eg-test-btn").addEventListener("click", async () => {
+    const resultDiv = document.getElementById("eg-test-result");
+    resultDiv.innerHTML = '<span class="text-sm text-secondary">Checking…</span>';
+    try {
+      const r = await postJson("/api/enterprise-guard-test", {
+        text: document.getElementById("eg-test-text").value,
+        path: document.getElementById("eg-test-path").value,
+      });
+      const rows = [];
+      if (r.text_result) rows.push(["Text", r.text_result]);
+      if (r.path_result) rows.push(["Path", r.path_result]);
+      if (!rows.length) {
+        resultDiv.innerHTML = '<span class="text-sm text-secondary">Enter text and/or a path above, then Test.</span>';
+        return;
+      }
+      resultDiv.innerHTML = rows.map(([label, res]) => {
+        const cls = res.blocked ? "text-danger" : "text-success";
+        const verdict = res.blocked ? "BLOCKED" : "Allowed";
+        const detail = res.blocked ? ` — ${escapeHtml(res.category || "")} / ${escapeHtml(res.rule_name || "")}` : "";
+        return `<div class="text-sm ${cls}"><strong>${label}: ${verdict}</strong>${detail}</div>`;
+      }).join("");
+    } catch (err) {
+      resultDiv.innerHTML = `<span class="text-sm text-danger">Error: ${escapeHtml(err.message)}</span>`;
+    }
+  });
+
+  async function loadEnterpriseGuardEvents() {
+    const tbody = document.getElementById("eg-events-body");
+    try {
+      const { events } = await fetchJson("/api/enterprise-guard/events?limit=100");
+      if (!events.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-sm text-secondary">No blocks yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = events.map((e) => `
+        <tr>
+          <td class="text-sm">${new Date(e.timestamp * 1000).toLocaleString()}</td>
+          <td class="text-sm">${escapeHtml(e.source || "")}</td>
+          <td class="text-sm">${escapeHtml(e.category || "")}</td>
+          <td class="text-sm">${escapeHtml(e.rule_name || "")}</td>
+        </tr>`).join("");
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="4" class="text-sm text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
   // ── proxy ─────────────────────────────────────────────────────────────────
 
   let _proxyRoutes = [];
@@ -1367,6 +1471,7 @@
     if (name === "security") {
       loadWafIpRules();
       loadWafEvents();
+      loadEnterpriseGuardEvents();
     }
     if (name === "proxy") {
       loadProxyStatus();
@@ -1397,6 +1502,7 @@
   loadSettings();
   loadPrivacySettings();
   loadWafSettings();
+  loadEnterpriseGuardSettings();
   loadStorageStatus();
   loadProfile();
   loadNotifications();
