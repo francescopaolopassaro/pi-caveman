@@ -757,6 +757,65 @@
     }
   }
 
+  async function loadEnterpriseGuardClients() {
+    const tbody = document.getElementById("eg-clients-body");
+    try {
+      const { clients } = await fetchJson("/api/enterprise-guard/clients");
+      if (!clients.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-sm text-secondary">No clients registered.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = clients.map((c) => `
+        <tr>
+          <td class="text-sm">${escapeHtml(c.label || "(no label)")}${c.auto_discovered ? ' <span class="badge badge-sm bg-gradient-secondary">auto-discovered</span>' : ""}</td>
+          <td class="text-sm"><code>${escapeHtml(c.ip || "–")}</code></td>
+          <td class="text-sm"><code>${escapeHtml(c.mac || "–")}</code></td>
+          <td class="text-sm">${c.blocked_paths.length} path(s)</td>
+          <td>
+            <div class="form-check form-switch mb-0">
+              <input class="form-check-input eg-client-enable-toggle" type="checkbox" role="switch" data-id="${escapeHtml(c.id)}" ${c.enabled ? "checked" : ""}>
+            </div>
+          </td>
+          <td><button type="button" class="btn btn-sm btn-outline-danger py-0 px-2 eg-client-remove-btn" data-id="${escapeHtml(c.id)}">Remove</button></td>
+        </tr>`).join("");
+      tbody.querySelectorAll(".eg-client-enable-toggle").forEach((el) => {
+        el.addEventListener("change", async () => {
+          await postJson("/api/enterprise-guard/clients/update", { id: el.dataset.id, enabled: el.checked });
+        });
+      });
+      tbody.querySelectorAll(".eg-client-remove-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          await postJson("/api/enterprise-guard/clients/delete", { id: btn.dataset.id });
+          loadEnterpriseGuardClients();
+        });
+      });
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="6" class="text-sm text-danger">Error: ${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  document.getElementById("eg-client-add-btn").addEventListener("click", async () => {
+    const btn = document.getElementById("eg-client-add-btn");
+    btn.disabled = true;
+    try {
+      await postJson("/api/enterprise-guard/clients", {
+        label: document.getElementById("eg-client-label").value,
+        ip: document.getElementById("eg-client-ip").value,
+        mac: document.getElementById("eg-client-mac").value,
+        blocked_paths: document.getElementById("eg-client-paths").value
+          .split("\n").map((s) => s.trim()).filter(Boolean),
+        enabled: true,
+      });
+      document.getElementById("eg-client-label").value = "";
+      document.getElementById("eg-client-ip").value = "";
+      document.getElementById("eg-client-mac").value = "";
+      document.getElementById("eg-client-paths").value = "";
+      loadEnterpriseGuardClients();
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   // ── proxy ─────────────────────────────────────────────────────────────────
 
   let _proxyRoutes = [];
@@ -1472,6 +1531,7 @@
       loadWafIpRules();
       loadWafEvents();
       loadEnterpriseGuardEvents();
+      loadEnterpriseGuardClients();
     }
     if (name === "proxy") {
       loadProxyStatus();

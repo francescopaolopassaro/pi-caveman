@@ -166,7 +166,37 @@ def main() -> None:
     )
     p_fwck.add_argument("--tool", "-t", required=True, help="Name of the tool about to be called")
     p_fwck.add_argument("--args", "-a", help="JSON object of the arguments that would be passed to it")
+    p_fwck.add_argument("--client-mac", help="Override the client identity used to look up per-client blocked paths (default: this machine's own MAC address)")
+    p_fwck.add_argument("--client-ip", help="Client identity by IP instead of MAC (rarely needed for a local hook — mainly for testing a proxy-style client's policy)")
+    p_fwck.add_argument("--no-client", action="store_true", help="Skip per-client policy lookup entirely, apply only the global default policy")
     p_fwck.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # clients — EnterpriseGuard per-client (IP/MAC) registry
+    p_clients = sub.add_parser("clients", help="Manage EnterpriseGuard's per-client (IP/MAC) protected-path registry")
+    clients_sub = p_clients.add_subparsers(dest="clients_cmd", required=True)
+
+    clients_sub.add_parser("list", help="List all registered clients").add_argument(
+        "--json", action="store_true", help="Output as JSON",
+    )
+
+    p_clients_add = clients_sub.add_parser("add", help="Register a new client")
+    p_clients_add.add_argument("--label", default="", help="Human-readable name")
+    p_clients_add.add_argument("--ip", default="", help="Client IP (for proxy clients)")
+    p_clients_add.add_argument("--mac", default="", help="Client MAC (for local machines — use 'self' for this machine's own MAC)")
+    p_clients_add.add_argument("--blocked-path", action="append", dest="blocked_paths", default=[], help="A protected-path glob pattern; repeat for more")
+    p_clients_add.add_argument("--disabled", action="store_true", help="Register but leave disabled (default: enabled)")
+
+    p_clients_update = clients_sub.add_parser("update", help="Update a registered client")
+    p_clients_update.add_argument("client_id")
+    p_clients_update.add_argument("--label")
+    p_clients_update.add_argument("--ip")
+    p_clients_update.add_argument("--mac")
+    p_clients_update.add_argument("--blocked-path", action="append", dest="blocked_paths", default=None, help="Replaces the client's whole blocked-path list; repeat for more")
+    p_clients_update.add_argument("--enable", action="store_true", help="Enable this client's per-client policy")
+    p_clients_update.add_argument("--disable", action="store_true", help="Disable this client's per-client policy")
+
+    p_clients_remove = clients_sub.add_parser("remove", help="Remove a registered client")
+    p_clients_remove.add_argument("client_id")
 
     # cluster — multi-node master/slave management
     p_cluster = sub.add_parser("cluster", help="Multi-node cluster management (master/slave)")
@@ -280,6 +310,8 @@ def main() -> None:
         _cmd_loop_reset(args)
     elif args.cmd == "firewall-check":
         _cmd_firewall_check(args)
+    elif args.cmd == "clients":
+        _cmd_clients(args)
     elif args.cmd == "cluster":
         _cmd_cluster(args)
     elif args.cmd == "retrieve":
@@ -1946,7 +1978,7 @@ def _cmd_firewall_check(args) -> None:
     Exit code doubles as the verdict: 0 = allow, 2 = block, without needing
     --json. See `synthelion/enterprise_guard.py`.
     """
-    from synthelion.enterprise_guard import EnterpriseGuard
+    from synthelion.enterprise_guard import EnterpriseGuard, local_machine_mac
 
     try:
         arguments = json.loads(args.args) if args.args else {}
@@ -1954,7 +1986,18 @@ def _cmd_firewall_check(args) -> None:
         print(f"ERROR: --args is not valid JSON: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
-    guard = EnterpriseGuard()
+    if args.no_client:
+        client_mac, client_ip = None, None
+    else:
+        # A PreToolUse hook always runs on the same machine as the agent, so
+        # this machine's own MAC is a free, automatic per-machine identity —
+        # no config needed for the common case of "one registered policy per
+        # developer laptop", while --client-mac/--client-ip still let an
+        # operator test a specific client's policy from any machine.
+        client_mac = args.client_mac or (None if args.client_ip else local_machine_mac())
+        client_ip = args.client_ip
+
+    guard = EnterpriseGuard(client_ip=client_ip, client_mac=client_mac)
     result = guard.check_tool_call(args.tool, arguments)
 
     if args.json:
@@ -1970,6 +2013,66 @@ def _cmd_firewall_check(args) -> None:
         print("ALLOW")
 
     raise SystemExit(2 if result.blocked else 0)
+
+
+def _client_to_row(c) -> dict:
+    return {
+        "id": c.id, "label": c.label, "ip": c.ip, "mac": c.mac,
+        "enabled": c.enabled, "auto_discovered": c.auto_discovered,
+        "blocked_paths": c.blocked_paths,
+    }
+
+
+def _cmd_clients(args) -> None:
+    """Manage EnterpriseGuard's per-client (IP/MAC) protected-path registry —
+    see `synthelion/enterprise_guard.py`'s client-registry section. A client
+    the proxy has auto-discovered but nobody has reviewed shows up here with
+    `enabled: false` and `auto_discovered: true`."""
+    from synthelion import enterprise_guard as eg
+
+    if args.clients_cmd == "list":
+        clients = [_client_to_row(c) for c in eg.list_clients()]
+        if args.json:
+            print(json.dumps(clients, ensure_ascii=False))
+            return
+        if not clients:
+            print("No clients registered.")
+            return
+        for c in clients:
+            flags = []
+            if c["auto_discovered"]:
+                flags.append("auto-discovered")
+            flags.append("enabled" if c["enabled"] else "disabled")
+            print(f"{c['id']}  {c['label'] or '(no label)':<20}  ip={c['ip'] or '-':<15}  mac={c['mac'] or '-':<17}  [{', '.join(flags)}]  {len(c['blocked_paths'])} path(s)")
+        return
+
+    if args.clients_cmd == "add":
+        mac = args.mac
+        if mac == "self":
+            mac = eg.local_machine_mac()
+        client = eg.add_client(
+            label=args.label, ip=args.ip, mac=mac, blocked_paths=args.blocked_paths,
+            enabled=not args.disabled,
+        )
+        print(f"[OK] Registered client '{client.id}' ({client.label or 'no label'}).")
+        return
+
+    if args.clients_cmd == "update":
+        enabled = True if args.enable else (False if args.disable else None)
+        client = eg.update_client(
+            args.client_id, label=args.label, ip=args.ip, mac=args.mac,
+            blocked_paths=args.blocked_paths, enabled=enabled,
+        )
+        if client is None:
+            print(f"ERROR: no client with id '{args.client_id}'", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"[OK] Updated client '{client.id}'.")
+        return
+
+    if args.clients_cmd == "remove":
+        eg.delete_client(args.client_id)
+        print(f"[OK] Removed client '{args.client_id}' (if it existed).")
+        return
 
 
 if __name__ == "__main__":

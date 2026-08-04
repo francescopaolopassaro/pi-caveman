@@ -354,12 +354,9 @@ class TestDashboardWafApi:
 
 
 class TestDashboardEnterpriseGuardApi:
-    @pytest.fixture(autouse=True)
-    def _clear_events(self):
-        from synthelion.enterprise_guard import _recent_blocks
-        _recent_blocks.clear()
-        yield
-        _recent_blocks.clear()
+    # No explicit event-log isolation needed: recent_blocks()/_record_block()
+    # default to Path.home()/".synthelion", and dashboard_server already
+    # monkeypatches Path.home() to a fresh tmp_path per test.
 
     def test_test_endpoint_requires_auth(self, dashboard_server):
         resp = _post_json(dashboard_server, "/api/enterprise-guard-test", {"text": "hello"})
@@ -411,6 +408,61 @@ class TestDashboardEnterpriseGuardApi:
         body = json.loads(resp.read())
         assert len(body["events"]) == 1
         assert body["events"][0]["source"] == "cli"
+
+    def test_clients_list_requires_auth(self, dashboard_server):
+        resp = _get(dashboard_server, "/api/enterprise-guard/clients")
+        resp.read()
+        assert resp.status == 401
+
+    def test_clients_add_requires_auth(self, dashboard_server):
+        resp = _post_json(dashboard_server, "/api/enterprise-guard/clients", {"label": "X", "ip": "10.0.0.1"})
+        resp.read()
+        assert resp.status == 401
+
+    def test_clients_empty_by_default(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _get(dashboard_server, "/api/enterprise-guard/clients", cookie)
+        body = json.loads(resp.read())
+        assert body["clients"] == []
+
+    def test_add_and_list_client(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(
+            dashboard_server, "/api/enterprise-guard/clients",
+            {"label": "Laptop A", "ip": "203.0.113.7", "blocked_paths": ["**/fatture/**"]}, cookie,
+        )
+        added = json.loads(resp.read())
+        assert added["client"]["label"] == "Laptop A"
+        assert added["client"]["enabled"] is True
+
+        resp = _get(dashboard_server, "/api/enterprise-guard/clients", cookie)
+        body = json.loads(resp.read())
+        assert len(body["clients"]) == 1
+        assert body["clients"][0]["ip"] == "203.0.113.7"
+
+    def test_update_client_enabled(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(dashboard_server, "/api/enterprise-guard/clients", {"label": "X", "ip": "10.0.0.1", "enabled": False}, cookie)
+        client_id = json.loads(resp.read())["client"]["id"]
+
+        resp = _post_json(dashboard_server, "/api/enterprise-guard/clients/update", {"id": client_id, "enabled": True}, cookie)
+        body = json.loads(resp.read())
+        assert body["client"]["enabled"] is True
+
+    def test_update_unknown_client_returns_error(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(dashboard_server, "/api/enterprise-guard/clients/update", {"id": "does-not-exist", "enabled": True}, cookie)
+        body = json.loads(resp.read())
+        assert "error" in body
+
+    def test_delete_client(self, dashboard_server):
+        cookie = _login(dashboard_server)
+        resp = _post_json(dashboard_server, "/api/enterprise-guard/clients", {"label": "X", "ip": "10.0.0.1"}, cookie)
+        client_id = json.loads(resp.read())["client"]["id"]
+
+        _post_json(dashboard_server, "/api/enterprise-guard/clients/delete", {"id": client_id}, cookie).read()
+        resp = _get(dashboard_server, "/api/enterprise-guard/clients", cookie)
+        assert json.loads(resp.read())["clients"] == []
 
     def test_detect_only_by_default_never_blocks_malicious_request(self, dashboard_server):
         # block_mode defaults to False — a malicious-looking request must still

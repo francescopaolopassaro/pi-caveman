@@ -235,15 +235,15 @@ class TestConfigIntegration:
 
 
 class TestRecentBlocksRecorder:
-    """In-memory recent-blocks log for dashboard visibility — never stores
-    the triggering text/path, only category/rule/source/timestamp."""
+    """Cross-process (JSONL-file-backed) recent-blocks log for dashboard
+    visibility — never stores the triggering text/path, only
+    category/rule/source/timestamp. Isolated to tmp_path per test since it
+    defaults to Path.home()/".synthelion"."""
 
     @pytest.fixture(autouse=True)
-    def _clear_events(self):
-        from synthelion.enterprise_guard import _recent_blocks
-        _recent_blocks.clear()
-        yield
-        _recent_blocks.clear()
+    def _isolate_home(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     def test_blocked_check_text_is_recorded(self):
         from synthelion.enterprise_guard import recent_blocks
@@ -362,3 +362,191 @@ class TestCompressBlockedByEnterpriseGuard:
         data = self._run_compress("DATABASE_URL=postgres://admin:hunter2@db.internal.example.com:5432/prod")
         assert data["blocked"] is True
         assert data["enterprise_guard_blocked"] is True
+
+
+class TestClientRegistry:
+    """Per-client (IP/MAC) protected-path registry — synthelion/enterprise_guard.py's
+    add_client/update_client/delete_client/identify_client/discover_client.
+    Isolated to tmp_path per test (defaults to Path.home()/".synthelion")."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_home(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def test_add_and_list_client(self):
+        from synthelion.enterprise_guard import add_client, list_clients
+        add_client(label="Laptop A", ip="203.0.113.7", blocked_paths=["**/fatture/**"])
+        clients = list_clients()
+        assert len(clients) == 1
+        assert clients[0].label == "Laptop A"
+        assert clients[0].ip == "203.0.113.7"
+        assert clients[0].enabled is True
+        assert clients[0].blocked_paths == ["**/fatture/**"]
+
+    def test_identify_client_by_ip(self):
+        from synthelion.enterprise_guard import add_client, identify_client
+        client = add_client(label="Proxy Client", ip="203.0.113.7")
+        found = identify_client(ip="203.0.113.7")
+        assert found is not None
+        assert found.id == client.id
+
+    def test_identify_client_by_mac(self):
+        from synthelion.enterprise_guard import add_client, identify_client
+        client = add_client(label="Laptop", mac="AA:BB:CC:DD:EE:FF")
+        found = identify_client(mac="aa-bb-cc-dd-ee-ff")  # different case/separator
+        assert found is not None
+        assert found.id == client.id
+
+    def test_identify_unregistered_client_returns_none(self):
+        from synthelion.enterprise_guard import identify_client
+        assert identify_client(ip="10.0.0.99") is None
+
+    def test_update_client_blocked_paths(self):
+        from synthelion.enterprise_guard import add_client, update_client
+        client = add_client(label="X", ip="10.0.0.1")
+        updated = update_client(client.id, blocked_paths=["**/payroll/**"])
+        assert updated.blocked_paths == ["**/payroll/**"]
+
+    def test_update_client_enable_disable(self):
+        from synthelion.enterprise_guard import add_client, update_client
+        client = add_client(label="X", ip="10.0.0.1", enabled=False)
+        assert update_client(client.id, enabled=True).enabled is True
+        assert update_client(client.id, enabled=False).enabled is False
+
+    def test_update_unknown_client_returns_none(self):
+        from synthelion.enterprise_guard import update_client
+        assert update_client("does-not-exist", label="x") is None
+
+    def test_delete_client(self):
+        from synthelion.enterprise_guard import add_client, delete_client, list_clients
+        client = add_client(label="X", ip="10.0.0.1")
+        delete_client(client.id)
+        assert list_clients() == []
+
+    def test_discover_client_creates_disabled_entry(self):
+        from synthelion.enterprise_guard import discover_client
+        client = discover_client("198.51.100.5")
+        assert client.enabled is False
+        assert client.auto_discovered is True
+        assert client.ip == "198.51.100.5"
+
+    def test_discover_client_is_idempotent(self):
+        from synthelion.enterprise_guard import discover_client, list_clients
+        first = discover_client("198.51.100.5")
+        second = discover_client("198.51.100.5")
+        assert first.id == second.id
+        assert len(list_clients()) == 1
+
+    def test_discover_client_does_not_overwrite_existing_registration(self):
+        from synthelion.enterprise_guard import add_client, discover_client
+        add_client(label="Known good", ip="198.51.100.5", enabled=True)
+        rediscovered = discover_client("198.51.100.5")
+        assert rediscovered.enabled is True
+        assert rediscovered.label == "Known good"
+
+    def test_local_machine_mac_is_stable_and_formatted(self):
+        from synthelion.enterprise_guard import local_machine_mac
+        mac1 = local_machine_mac()
+        mac2 = local_machine_mac()
+        assert mac1 == mac2
+        assert len(mac1.split(":")) == 6
+
+
+class TestPerClientBlockedPaths:
+    """EnterpriseGuard(client_ip=...)/EnterpriseGuard(client_mac=...) apply an
+    ENABLED client's extra blocked_paths on top of the global policy."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_home(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def test_enabled_client_extra_path_is_blocked(self):
+        from synthelion.enterprise_guard import add_client
+        add_client(label="X", ip="203.0.113.7", blocked_paths=["**/fatture/**"])
+        guard = EnterpriseGuard({
+            "enabled": True, "content_categories": {}, "blocked_paths": [], "use_default_blocked_paths": False,
+        }, client_ip="203.0.113.7")
+        assert guard.check_path("C:/data/fatture/2026/invoice.pdf").blocked is True
+
+    def test_disabled_client_extra_path_is_not_applied(self):
+        from synthelion.enterprise_guard import add_client
+        add_client(label="X", ip="203.0.113.7", blocked_paths=["**/fatture/**"], enabled=False)
+        guard = EnterpriseGuard({
+            "enabled": True, "content_categories": {}, "blocked_paths": [], "use_default_blocked_paths": False,
+        }, client_ip="203.0.113.7")
+        assert guard.check_path("C:/data/fatture/2026/invoice.pdf").blocked is False
+
+    def test_unregistered_client_ip_falls_back_to_global_only(self):
+        guard = EnterpriseGuard({
+            "enabled": True, "content_categories": {}, "blocked_paths": ["**/global-secret/**"], "use_default_blocked_paths": False,
+        }, client_ip="10.0.0.99")
+        assert guard.check_path("C:/data/global-secret/x.txt").blocked is True
+        assert guard.check_path("C:/data/fatture/x.pdf").blocked is False
+
+    def test_no_client_given_uses_global_only(self):
+        guard = EnterpriseGuard({
+            "enabled": True, "content_categories": {}, "blocked_paths": [], "use_default_blocked_paths": False,
+        })
+        assert guard.client is None
+
+
+class TestClientsCli:
+    def _run(self, args: list[str]) -> tuple[str, str, int]:
+        from synthelion.cli import main
+        with patch("sys.argv", ["synthelion"] + args):
+            with patch("sys.stdout", new_callable=StringIO) as mock_out:
+                with patch("sys.stderr", new_callable=StringIO) as mock_err:
+                    code = 0
+                    try:
+                        main()
+                    except SystemExit as e:
+                        code = e.code or 0
+                    return mock_out.getvalue(), mock_err.getvalue(), code
+
+    @pytest.fixture(autouse=True)
+    def _isolate_home(self, tmp_path, monkeypatch):
+        from pathlib import Path
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    def test_list_empty(self):
+        out, err, code = self._run(["clients", "list"])
+        assert "No clients registered" in out
+        assert code == 0
+
+    def test_add_and_list(self):
+        self._run(["clients", "add", "--label", "Laptop A", "--ip", "203.0.113.7", "--blocked-path", "**/fatture/**"])
+        out, err, code = self._run(["clients", "list", "--json"])
+        data = json.loads(out.strip())
+        assert len(data) == 1
+        assert data[0]["label"] == "Laptop A"
+        assert data[0]["blocked_paths"] == ["**/fatture/**"]
+
+    def test_add_disabled(self):
+        self._run(["clients", "add", "--label", "X", "--ip", "10.0.0.1", "--disabled"])
+        out, err, code = self._run(["clients", "list", "--json"])
+        data = json.loads(out.strip())
+        assert data[0]["enabled"] is False
+
+    def test_update_enable(self):
+        self._run(["clients", "add", "--label", "X", "--ip", "10.0.0.1", "--disabled"])
+        out, err, code = self._run(["clients", "list", "--json"])
+        client_id = json.loads(out.strip())[0]["id"]
+        out2, err2, code2 = self._run(["clients", "update", client_id, "--enable"])
+        assert code2 == 0
+        out3, _, _ = self._run(["clients", "list", "--json"])
+        assert json.loads(out3.strip())[0]["enabled"] is True
+
+    def test_update_unknown_client_errors(self):
+        out, err, code = self._run(["clients", "update", "does-not-exist", "--label", "x"])
+        assert code == 1
+        assert "ERROR" in err
+
+    def test_remove(self):
+        self._run(["clients", "add", "--label", "X", "--ip", "10.0.0.1"])
+        out, _, _ = self._run(["clients", "list", "--json"])
+        client_id = json.loads(out.strip())[0]["id"]
+        self._run(["clients", "remove", client_id])
+        out2, _, _ = self._run(["clients", "list", "--json"])
+        assert json.loads(out2.strip()) == []

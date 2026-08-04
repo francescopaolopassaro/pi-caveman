@@ -1705,6 +1705,48 @@
               <div id="eg-test-result" class="mt-3"></div>
 
               <hr class="my-4">
+              <h6 class="mb-0">Clients</h6>
+              <p class="text-sm mb-2 text-secondary">Per-client protected-path policies, keyed by IP (proxy callers) or MAC (local CLI/hook, via <code>synthelion firewall-check</code> — defaults to this machine's own MAC). A client's paths are <strong>additive</strong> to the policy above, and only apply while <strong>Enabled</strong>. A client the proxy sees for the first time is auto-registered here, disabled, labeled "Auto-discovered" — review and enable it to activate its policy.</p>
+              <div class="table-responsive mb-3">
+                <table class="table align-items-center mb-0">
+                  <thead>
+                    <tr>
+                      <th class="text-xs text-secondary text-uppercase">Label</th>
+                      <th class="text-xs text-secondary text-uppercase">IP</th>
+                      <th class="text-xs text-secondary text-uppercase">MAC</th>
+                      <th class="text-xs text-secondary text-uppercase">Blocked paths</th>
+                      <th class="text-xs text-secondary text-uppercase">Enabled</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="eg-clients-body">
+                    <tr><td colspan="6" class="text-sm text-secondary">No clients registered.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="row g-2 align-items-end">
+                <div class="col-md-2">
+                  <label class="form-label text-sm">Label</label>
+                  <input type="text" class="form-control" id="eg-client-label" placeholder="Laptop Marketing">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label text-sm">IP</label>
+                  <input type="text" class="form-control" id="eg-client-ip" placeholder="203.0.113.7">
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label text-sm">MAC</label>
+                  <input type="text" class="form-control" id="eg-client-mac" placeholder="aa:bb:cc:dd:ee:ff">
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label text-sm">Blocked paths (one per line)</label>
+                  <textarea class="form-control" id="eg-client-paths" rows="1" placeholder="**/fatture/**"></textarea>
+                </div>
+                <div class="col-md-2">
+                  <button type="button" class="btn bg-gradient-info mb-0 w-100" id="eg-client-add-btn">Add client</button>
+                </div>
+              </div>
+
+              <hr class="my-4">
               <h6 class="mb-0">Recent blocks</h6>
               <p class="text-sm mb-0 text-secondary">Metadata only (category/rule/source/time) — the actual blocked text or path is never logged.</p>
               <div class="table-responsive mt-2">

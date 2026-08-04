@@ -208,7 +208,10 @@ def _level_map() -> dict:
     return _LEVEL_MAP
 
 
-def _process_text(text: str, pcfg: dict, level_override: str | None = None, ccr: "_CcrStore | None" = None) -> tuple[str, int, int]:
+def _process_text(
+    text: str, pcfg: dict, level_override: str | None = None, ccr: "_CcrStore | None" = None,
+    client_ip: str | None = None,
+) -> tuple[str, int, int]:
     """Runs the privacy pre-pass + compression on one string. Raises _Blocked
     if the risk score crosses `privacy.block_min_score` and `block_on_risk`
     is on. Returns (possibly masked+compressed text, tokens_before, tokens_after).
@@ -240,8 +243,16 @@ def _process_text(text: str, pcfg: dict, level_override: str | None = None, ccr:
     # credential-shaped content has no safe redacted form, always block-or-allow.
     # Checked against the ORIGINAL (pre-privacy-masking) text — see cli.py's
     # identical comment for why (masking can break a secret's regex shape).
+    # client_ip identifies the connecting caller against the client registry
+    # (see enterprise_guard.py) — today this only affects the recorded
+    # block's audit source ("proxy:<ip>"), since check_text itself isn't yet
+    # per-client-policy-aware (only check_path/check_tool_call are); wiring
+    # the real client IP through now means that's a config change, not a
+    # code change, if/when per-client content policy is added.
     from synthelion.enterprise_guard import EnterpriseGuard
-    eg_result = EnterpriseGuard().check_text(original_text, source="proxy")
+    guard = EnterpriseGuard(client_ip=client_ip)
+    source = f"proxy:{client_ip}" if client_ip else "proxy"
+    eg_result = guard.check_text(original_text, source=source)
     if eg_result.blocked:
         raise _Blocked(eg_result.reason)
 
@@ -456,6 +467,20 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         start = time.perf_counter()
         cfg = self.proxy_cfg
         client_ip = self.client_address[0] if self.client_address else ""
+
+        if client_ip:
+            from synthelion.config import enterprise_guard_config
+            if enterprise_guard_config().get("auto_discover_clients", True):
+                # Auto-register a never-before-seen client IP, disabled by
+                # default — an admin reviews/labels/enables it from the
+                # dashboard's EnterpriseGuard > Clients table. Idempotent
+                # and cheap (a small local JSON file, no network I/O) —
+                # no-ops instantly for an already-known IP.
+                from synthelion.enterprise_guard import discover_client
+                try:
+                    discover_client(client_ip)
+                except OSError:
+                    pass
 
         upstream = _resolve_upstream(self.path, cfg)
         if not upstream:

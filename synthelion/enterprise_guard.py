@@ -32,11 +32,12 @@ Synthelion.
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Content detectors
@@ -145,6 +146,204 @@ DEFAULT_BLOCKED_PATH_PATTERNS: tuple[str, ...] = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Per-client registry — protected-path policies are not one global list.
+# Synthelion is typically a shared install (a proxy or MCP server many
+# different machines/agents talk to), so "block reading this file" has to be
+# answerable per-caller, not just globally. A client is identified by:
+#   - IP address — the natural identity for network callers (the proxy,
+#     which sees the real connecting IP per request).
+#   - MAC address — the natural identity for the *local* machine a CLI/hook
+#     invocation runs on (`uuid.getnode()`), useful when the same shared
+#     config/registry is consulted by several different physical machines
+#     (e.g. synced dotfiles, a central admin policy) rather than each having
+#     fully independent config.
+# A client's `blocked_paths` are ADDITIVE to the global `blocked_paths`/
+# defaults (from `enterprise_guard_config()`) — registering a client only
+# ever adds restrictions, never removes the baseline ones.
+# ---------------------------------------------------------------------------
+
+_CLIENTS_FILE = "enterprise_guard_clients.json"
+_clients_lock = threading.Lock()
+
+
+def _clients_path(directory: "Path | None" = None) -> "Path":
+    d = directory or (Path.home() / ".synthelion")
+    d.mkdir(parents=True, exist_ok=True)
+    return d / _CLIENTS_FILE
+
+
+@dataclass
+class EnterpriseGuardClient:
+    id: str
+    label: str = ""
+    ip: str = ""
+    mac: str = ""
+    blocked_paths: "list[str]" = None  # type: ignore[assignment]
+    created_at: float = 0.0
+    # False for an auto-discovered client (see discover_client) — its own
+    # blocked_paths are ignored until an admin reviews and enables it from
+    # the dashboard, so a never-seen-before caller never silently gains
+    # extra restrictions (or, more importantly, is never silently trusted
+    # with anything beyond the baseline global policy) without a human
+    # looking at it first. Manually added clients default to enabled.
+    enabled: bool = True
+    auto_discovered: bool = False
+
+    def __post_init__(self) -> None:
+        if self.blocked_paths is None:
+            self.blocked_paths = []
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "label": self.label, "ip": self.ip, "mac": self.mac,
+            "blocked_paths": self.blocked_paths, "created_at": self.created_at,
+            "enabled": self.enabled, "auto_discovered": self.auto_discovered,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EnterpriseGuardClient":
+        return cls(
+            id=d["id"], label=d.get("label", ""), ip=d.get("ip", ""), mac=d.get("mac", ""),
+            blocked_paths=list(d.get("blocked_paths", [])), created_at=d.get("created_at", 0.0),
+            enabled=d.get("enabled", True), auto_discovered=d.get("auto_discovered", False),
+        )
+
+
+def _load_clients(directory: "Path | None" = None) -> "list[EnterpriseGuardClient]":
+    path = _clients_path(directory)
+    if not path.exists():
+        return []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [EnterpriseGuardClient.from_dict(d) for d in data]
+    except (OSError, json.JSONDecodeError, KeyError):
+        return []
+
+
+def _save_clients(clients: "list[EnterpriseGuardClient]", directory: "Path | None" = None) -> None:
+    import os
+    path = _clients_path(directory)
+    tmp = path.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump([c.to_dict() for c in clients], fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def list_clients(directory: "Path | None" = None) -> "list[EnterpriseGuardClient]":
+    return _load_clients(directory)
+
+
+def add_client(
+    label: str = "", ip: str = "", mac: str = "", blocked_paths: "list[str] | None" = None,
+    enabled: bool = True, directory: "Path | None" = None,
+) -> EnterpriseGuardClient:
+    import secrets
+    ip = (ip or "").strip()
+    mac = _normalize_mac(mac)
+    with _clients_lock:
+        clients = _load_clients(directory)
+        client = EnterpriseGuardClient(
+            id=secrets.token_hex(6), label=label.strip(), ip=ip, mac=mac,
+            blocked_paths=list(blocked_paths or []), created_at=time.time(), enabled=enabled,
+        )
+        clients.append(client)
+        _save_clients(clients, directory)
+        return client
+
+
+def update_client(
+    client_id: str, label: "str | None" = None, ip: "str | None" = None, mac: "str | None" = None,
+    blocked_paths: "list[str] | None" = None, enabled: "bool | None" = None,
+    directory: "Path | None" = None,
+) -> "EnterpriseGuardClient | None":
+    with _clients_lock:
+        clients = _load_clients(directory)
+        for c in clients:
+            if c.id == client_id:
+                if label is not None:
+                    c.label = label.strip()
+                if ip is not None:
+                    c.ip = ip.strip()
+                if mac is not None:
+                    c.mac = _normalize_mac(mac)
+                if blocked_paths is not None:
+                    c.blocked_paths = list(blocked_paths)
+                if enabled is not None:
+                    c.enabled = enabled
+                _save_clients(clients, directory)
+                return c
+    return None
+
+
+def discover_client(ip: str, directory: "Path | None" = None) -> "EnterpriseGuardClient | None":
+    """Idempotent auto-registration for a never-before-seen proxy client IP:
+    if a client with this IP already exists (whatever its enabled state),
+    returns it unchanged with no write. Otherwise creates a new, disabled
+    entry labeled "Auto-discovered" — visible in the dashboard for an admin
+    to review, label, assign paths to, and enable, but inert (no extra
+    restrictions applied) until they do. Never called for an empty/missing
+    IP (nothing to register)."""
+    ip = (ip or "").strip()
+    if not ip:
+        return None
+    with _clients_lock:
+        clients = _load_clients(directory)
+        for c in clients:
+            if c.ip == ip:
+                return c
+        import secrets
+        client = EnterpriseGuardClient(
+            id=secrets.token_hex(6), label="Auto-discovered", ip=ip,
+            created_at=time.time(), enabled=False, auto_discovered=True,
+        )
+        clients.append(client)
+        _save_clients(clients, directory)
+        return client
+
+
+def delete_client(client_id: str, directory: "Path | None" = None) -> None:
+    with _clients_lock:
+        clients = [c for c in _load_clients(directory) if c.id != client_id]
+        _save_clients(clients, directory)
+
+
+def _normalize_mac(mac: str) -> str:
+    mac = (mac or "").strip().lower().replace("-", ":")
+    return mac
+
+
+def local_machine_mac() -> str:
+    """This machine's own MAC address, formatted `aa:bb:cc:dd:ee:ff` — the
+    default client identity for CLI/hook invocations (which always run
+    locally, so there's no network-layer IP to key on the way the proxy
+    has). Not cryptographically strong client identity (a MAC can be
+    spoofed) — a convenience default for shared-config multi-machine setups,
+    not a security boundary on its own."""
+    import uuid
+    node = uuid.getnode()
+    return ":".join(f"{(node >> shift) & 0xFF:02x}" for shift in range(40, -1, -8))
+
+
+def identify_client(
+    ip: "str | None" = None, mac: "str | None" = None, directory: "Path | None" = None,
+) -> "EnterpriseGuardClient | None":
+    """Resolves an incoming connection to a registered client by exact IP or
+    MAC match (IP checked first). Returns None for an unregistered
+    caller — callers should fall back to the global default policy, never
+    fail closed/open silently on a registry miss."""
+    if not ip and not mac:
+        return None
+    mac_norm = _normalize_mac(mac) if mac else None
+    for c in _load_clients(directory):
+        if ip and c.ip and c.ip == ip:
+            return c
+        if mac_norm and c.mac and c.mac == mac_norm:
+            return c
+    return None
+
+
 @dataclass(frozen=True)
 class GuardResult:
     blocked: bool
@@ -154,44 +353,93 @@ class GuardResult:
 
 
 # ---------------------------------------------------------------------------
-# In-memory recent-blocks log — for dashboard visibility only. Deliberately
-# never stores the triggering text/path (only category/rule/source/time), so
-# it can't itself become a place a secret ends up persisted. Process-lifetime
-# only, not written to disk — same reasoning as other in-process-only state
-# in this project (e.g. dashboard session tokens), and appropriate here since
-# this is operational visibility, not a compliance audit trail.
+# Cross-process recent-blocks log — for dashboard visibility. Synthelion runs
+# as a server with many independent processes hitting it concurrently (the
+# CLI hook is a fresh process per call, the MCP server is its own long-lived
+# stdio process per agent session, the proxy is another process again) — an
+# in-memory-only log would only ever show blocks that happened to occur in
+# whichever process the dashboard itself is running in. Persisted as a JSONL
+# file instead, same pattern as `waf_guard.py`'s event log: atomic per-line
+# append (`synthelion/analytics/_atomic_append.py`, safe across concurrent
+# processes on both POSIX and Windows — see that module's docstring), no
+# in-process lock needed because there's nothing to protect beyond the
+# atomic-append primitive itself (consistent with this project's "no
+# cross-process locks" rule for shared state).
+#
+# Deliberately never stores the triggering text/path (only
+# category/rule/source/timestamp), so the log itself can't become a place a
+# secret ends up persisted.
 # ---------------------------------------------------------------------------
 
-_EVENTS_CAP = 500
-_events_lock = threading.Lock()
-_recent_blocks: "deque[dict]" = deque(maxlen=_EVENTS_CAP)
+_EVENTS_FILE = "enterprise_guard_events.jsonl"
+_EVENTS_CAP = 2000
 
 
-def _record_block(result: GuardResult, source: str) -> None:
-    with _events_lock:
-        _recent_blocks.appendleft({
-            "timestamp": time.time(),
-            "category": result.category,
-            "rule_name": result.rule_name,
-            "source": source,
-        })
+def _events_path(directory: "Path | None" = None) -> "Path":
+    # Path.home() re-read every call, not cached — see waf_guard.py/ledger.py's
+    # identical comment: a cached constant would defeat tests that monkeypatch
+    # Path.home() to an isolated tmp_path.
+    d = directory or (Path.home() / ".synthelion")
+    d.mkdir(parents=True, exist_ok=True)
+    return d / _EVENTS_FILE
 
 
-def recent_blocks(limit: int = 100) -> list[dict]:
-    with _events_lock:
-        return list(_recent_blocks)[:limit]
+def _record_block(result: GuardResult, source: str, directory: "Path | None" = None) -> None:
+    from synthelion.analytics._atomic_append import append_line
+    event = {
+        "timestamp": time.time(),
+        "category": result.category,
+        "rule_name": result.rule_name,
+        "source": source,
+    }
+    try:
+        append_line(_events_path(directory), (json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
+    except OSError:
+        pass
+
+
+def recent_blocks(limit: int = 100, directory: "Path | None" = None) -> list[dict]:
+    path = _events_path(directory)
+    if not path.exists():
+        return []
+    events: list[dict] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    events.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
+    return events[:limit]
 
 
 class EnterpriseGuard:
     """Stateless-per-config gate — construct with the effective
     `enterprise_guard.*` config (see `synthelion.config.enterprise_guard_config`)
-    and call `check_text`/`check_path`/`check_tool_call`."""
+    and call `check_text`/`check_path`/`check_tool_call`.
+
+    Pass `client_ip` (proxy: the connecting socket's IP) and/or `client_mac`
+    (CLI/hook: `local_machine_mac()`) to additionally apply that specific
+    client's own `blocked_paths` (see `identify_client`/the client registry
+    above) on top of the global defaults/config. Neither given, or the
+    client isn't registered, falls back to exactly the global-only policy —
+    fully backward compatible with callers that don't know about clients."""
 
     # Common tool-input argument names across Claude Code/MCP-style tools that
     # carry a filesystem path, checked by check_tool_call.
     _PATH_ARG_NAMES = ("file_path", "path", "notebook_path", "filePath", "target_file")
 
-    def __init__(self, config: "dict | None" = None) -> None:
+    def __init__(
+        self, config: "dict | None" = None, *,
+        client_ip: "str | None" = None, client_mac: "str | None" = None,
+        client_registry_directory: "Path | None" = None,
+    ) -> None:
         from synthelion.config import enterprise_guard_config
         cfg = config if config is not None else enterprise_guard_config()
         self.enabled = cfg.get("enabled", True)
@@ -199,6 +447,16 @@ class EnterpriseGuard:
         self._blocked_patterns: list[str] = list(cfg.get("blocked_paths", []))
         if cfg.get("use_default_blocked_paths", True):
             self._blocked_patterns.extend(DEFAULT_BLOCKED_PATH_PATTERNS)
+
+        self.client: "EnterpriseGuardClient | None" = None
+        if client_ip or client_mac:
+            self.client = identify_client(client_ip, client_mac, client_registry_directory)
+            # Only an explicitly *enabled* client's extra paths apply — an
+            # auto-discovered-but-not-yet-reviewed client (see
+            # discover_client) stays inert, never silently more restrictive
+            # (or, via absence, less protected) than the global baseline.
+            if self.client is not None and self.client.enabled:
+                self._blocked_patterns.extend(self.client.blocked_paths)
 
     # -- content ---------------------------------------------------------
 

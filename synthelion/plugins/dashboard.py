@@ -178,6 +178,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._serve_text(render_k8s_manifest(nodes), "synthelion-cluster.k8s.yaml")
             elif path == "/api/enterprise-guard/events":
                 self._serve_json(self._enterprise_guard_events(qs))
+            elif path == "/api/enterprise-guard/clients":
+                self._serve_json(self._enterprise_guard_clients())
             elif path == "/api/waf/events":
                 self._serve_json(self._waf_events(qs))
             elif path == "/api/waf/ip-rules":
@@ -251,6 +253,12 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._serve_json(self._privacy_test())
             elif path == "/api/enterprise-guard-test":
                 self._serve_json(self._enterprise_guard_test())
+            elif path == "/api/enterprise-guard/clients":
+                self._serve_json(self._enterprise_guard_add_client())
+            elif path == "/api/enterprise-guard/clients/update":
+                self._serve_json(self._enterprise_guard_update_client())
+            elif path == "/api/enterprise-guard/clients/delete":
+                self._serve_json(self._enterprise_guard_delete_client())
             elif path == "/api/documents/mask":
                 self._serve_json(self._documents_mask())
             elif path == "/api/waf/ip-rules":
@@ -542,6 +550,38 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 "rule_name": path_result.rule_name, "reason": path_result.reason,
             },
         }
+
+    @staticmethod
+    def _enterprise_guard_clients() -> dict:
+        from synthelion.enterprise_guard import list_clients
+        return {"clients": [c.to_dict() for c in list_clients()]}
+
+    def _enterprise_guard_add_client(self) -> dict:
+        from synthelion.enterprise_guard import add_client
+        data = self._read_json_body()
+        client = add_client(
+            label=data.get("label", ""), ip=data.get("ip", ""), mac=data.get("mac", ""),
+            blocked_paths=data.get("blocked_paths") or [], enabled=bool(data.get("enabled", True)),
+        )
+        return {"client": client.to_dict()}
+
+    def _enterprise_guard_update_client(self) -> dict:
+        from synthelion.enterprise_guard import update_client
+        data = self._read_json_body()
+        client_id = data.get("id", "")
+        client = update_client(
+            client_id, label=data.get("label"), ip=data.get("ip"), mac=data.get("mac"),
+            blocked_paths=data.get("blocked_paths"), enabled=data.get("enabled"),
+        )
+        if client is None:
+            return {"error": f"no client with id '{client_id}'"}
+        return {"client": client.to_dict()}
+
+    def _enterprise_guard_delete_client(self) -> dict:
+        from synthelion.enterprise_guard import delete_client
+        data = self._read_json_body()
+        delete_client(data.get("id", ""))
+        return {"status": "deleted"}
 
     @staticmethod
     def _waf_events(qs: dict) -> dict:

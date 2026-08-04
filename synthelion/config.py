@@ -123,6 +123,13 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         # below unless use_default_blocked_paths is turned off.
         "blocked_paths": [],
         "use_default_blocked_paths": True,
+        # Auto-register a never-before-seen proxy client IP into the client
+        # registry (disabled, unlabeled) on its first request, so it shows
+        # up in the dashboard's EnterpriseGuard > Clients table for an admin
+        # to review/label/enable rather than staying invisible until someone
+        # manually adds it. The client stays inert (no extra restrictions)
+        # until explicitly enabled.
+        "auto_discover_clients": True,
     },
     "waf": {
         # Master switch — set to False to disable request inspection entirely.

@@ -26,6 +26,7 @@ Supports 50+ languages out of the box. No AI model required. No configuration.
 
 - [Why Synthelion?](#why-synthelion)
 - [Privacy & Security — PrivacyGuard](#privacy--security--privacyguard)
+- [EnterpriseGuard — outbound data-loss-prevention firewall](#enterpriseguard--outbound-data-loss-prevention-firewall)
 - [Synthelion vs other prompt/context-compression tools](#synthelion-vs-other-promptcontext-compression-tools)
 - [Quick install — one command](#quick-install--one-command)
 - [Install (manual)](#install-manual)
@@ -455,6 +456,61 @@ Synthelion includes a built-in energy estimator. Every saved token avoids approx
 result = svc.compress(long_prompt, CompressionLevel.SEMANTIC)
 print(f"Energy saved: {result.estimated_energy_saved_mwh:.3f} mWh")
 print(f"CO₂ avoided:  {result.estimated_co2_saved_mg:.3f} mg")
+```
+
+---
+
+## EnterpriseGuard — outbound data-loss-prevention firewall
+
+A **hard block-or-allow firewall**, distinct from PrivacyGuard (PII, masked-and-continue) and the WAF (inbound HTTP request inspection). EnterpriseGuard is for enterprise secrets/credentials that have **no safe redacted form** — cloud/database/FTP/git credentials, private keys, bulk `.env` dumps — plus user-defined file "security zones" that must never be read into an agent's context at all.
+
+- **Content scanning** — AWS/Azure/GCP credentials, PostgreSQL/MySQL/MongoDB/JDBC/ADO.NET connection strings, FTP/SFTP URLs with embedded credentials, git remote URLs with embedded credentials, PEM private key blocks, GitHub/Slack/Bearer tokens, bulk `.env`-style dumps — always **block**, never mask (unlike PII, there's no safe redacted form of a live secret).
+- **File "security zones"** — user-defined glob patterns (`**/fatture/**`, `**/payroll/*.xlsx`, `**/database.yml`, ...) an agent must never be allowed to read, enforced *before* the read happens via `synthelion firewall-check` — a `PreToolUse`-style hook you point Claude Code (or any agent hook that supports pre-tool vetoes) at. Ships with sensible defaults already blocked (`.env`, `.git/config`, SSH/PEM keys, cloud-credential files, `.npmrc`/`.pypirc`/`.netrc`, kubeconfig).
+- **Wired into every entry point**: CLI (`compress`), the Claude Code hook (goes through the CLI, no separate wiring needed), MCP/OpenAI-function tools (`compress`, plus an advisory `check_enterprise_guard` tool), and the local reverse proxy — the same posture as PrivacyGuard's `block_on_risk`.
+- **Per-client policies (IP/MAC), because Synthelion is a shared server, not a single-user tool.** A `blocked_paths` list isn't global-only: register a client by **IP** (the proxy sees the real connecting IP per request) or **MAC** (`synthelion firewall-check` defaults to *this machine's own MAC* — the natural identity for a local CLI/hook invocation) and give it its own additional protected paths. The proxy **auto-discovers** a never-before-seen client IP on its first request and registers it **disabled** — it shows up in the dashboard for an admin to label/configure/enable, never silently trusted or silently restricted before a human looks at it. Manage clients from the dashboard's Security page or `synthelion clients list/add/update/remove`.
+- **Audit log, not a data store**: a cross-process JSONL log (visible in the dashboard, survives regardless of which process — CLI/MCP/proxy — did the blocking) records only `category`/`rule_name`/`source`/`timestamp` for every block — **never** the triggering text or path, so the log itself can never become a place a secret ends up persisted.
+
+```bash
+# One-off check (advisory)
+synthelion firewall-check --tool Read --args '{"file_path": "/home/user/.env"}'
+# BLOCK: Blocked: '/home/user/.env' matches a protected security-zone pattern ('*.env').
+
+# Register a proxy client with its own extra protected paths
+synthelion clients add --label "Marketing laptop" --ip 203.0.113.7 \
+  --blocked-path "**/fatture/**" --blocked-path "**/payroll/*.xlsx"
+
+synthelion clients list
+```
+
+Wire `firewall-check` as a Claude Code `PreToolUse` hook (`.claude/settings.json`) to actually veto `Read`/`Bash`/`Grep` calls before they execute:
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Read|Bash|Grep|Glob",
+      "hooks": [{
+        "type": "command",
+        "command": "synthelion firewall-check --tool \"$CLAUDE_TOOL_NAME\" --args \"$CLAUDE_TOOL_INPUT\""
+      }]
+    }]
+  }
+}
+```
+
+Toggle/configure it in `~/.synthelion/config.json` (or the dashboard's Security page):
+```json
+{
+  "enterprise_guard": {
+    "enabled": true,
+    "content_categories": {
+      "cloud_credentials": true, "database_connections": true, "ftp_credentials": true,
+      "git_credentials": true, "private_keys": true, "api_tokens": true, "dotenv_bulk": true
+    },
+    "blocked_paths": [],
+    "use_default_blocked_paths": true,
+    "auto_discover_clients": true
+  }
+}
 ```
 
 ---
@@ -1258,6 +1314,12 @@ UI built with [Material Dashboard Free](https://www.creative-tim.com/product/mat
 ![Synthelion dashboard — privacy](docs/dashboard-privacy.png)
 
 **Privacy**: PrivacyGuard's own page — toggle the master switch, auto-masking, prompt-injection guard, and the AI transparency notice independently; pick the message language; manage a whitelist of values PrivacyGuard should never flag; and a **live tester** to paste text and see PII detection + prompt-injection screening side by side, without persisting anything. See [Privacy & Security — PrivacyGuard](#privacy--security--privacyguard) below for the full feature set.
+
+![Synthelion dashboard — security (WAF + EnterpriseGuard)](docs/dashboard-security.png)
+
+**Security**: the WAF/firewall panel (request inspection, IP allow/block, auto-ban, rate limiting, recent events) plus, below it, **EnterpriseGuard** — see the close-up and full write-up in [EnterpriseGuard — outbound data-loss-prevention firewall](#enterpriseguard--outbound-data-loss-prevention-firewall).
+
+![Synthelion dashboard — EnterpriseGuard detail](docs/dashboard-enterprise-guard.png)
 
 ![Synthelion dashboard — doctor](docs/dashboard-doctor.png)
 
