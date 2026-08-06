@@ -4,6 +4,15 @@ All notable changes to Synthelion are documented here.
 
 ---
 
+## [Unreleased]
+
+### Fixed — EnterpriseGuard black-box hardening
+- **`check_path` now canonicalizes before matching** (`enterprise_guard.py`). The zone check matched only the literal path string, so a symlink pointing into a protected zone, or a non-canonical/relative spelling of a path inside it, evaded a glob written for the canonical location (e.g. `/tmp/link/f.pdf` and the bare relative `fatture/f.pdf` both slipped past `**/fatture/**`). Each path is now matched against both its literal form and its fully resolved real path (`Path.resolve`, symlinks / `..` / `./` / relative segments collapsed), closing the escape while keeping the literal fallback for paths that can't be resolved.
+- **`check_text` now scans the full content, not just the first 64 KiB** (`enterprise_guard.py`). The outbound-content scan truncated to `text[:64KiB]`, so any credential past that offset went out unscanned — a trivial exfiltration path (pad with filler, append the secret). Scanning now walks the whole text in overlapping 64 KiB windows (1 KiB overlap, wider than any single credential match, so a secret straddling a window edge is still caught); the line-oriented bulk-`.env` check runs once over the full text.
+- New tests: `tests/test_enterprise_guard_hardening.py` (symlink/`..`/relative zone evasion; secret past the 64 KiB cap; secret straddling a window boundary; clean-content negatives).
+
+---
+
 ## [1.2.5] — 2026-08-03
 
 ### Added — EnterpriseGuard (outbound data-loss-prevention firewall)
