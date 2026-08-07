@@ -4,6 +4,15 @@ All notable changes to Synthelion are documented here.
 
 ---
 
+## [Unreleased]
+
+### Fixed — installer settings.json safety (`install_claude.py` / `.sh` / `.ps1`)
+- **Atomic writes.** The installers wrote `~/.claude/settings.json` in place, so an interrupted or concurrent write (e.g. Claude Code writing the same file) could leave it truncated/corrupt. Each installer now stages the new content in a same-directory temp file and atomically replaces the target (`os.replace` / `mv` of a sibling temp / `Move-Item -Force`) — the only place that touched the user's most important config non-atomically, now consistent with the atomic ledger/WAF writes elsewhere.
+- **Backup before modifying.** A valid `settings.json` was only backed up when it failed to parse; a working config was rewritten with no restore point. All three installers now copy an existing config to a timestamped `settings.json.bak-<ts>` before both configure and uninstall.
+- New tests: `tests/test_install_claude.py` (atomic write leaves no temp file and overwrites cleanly; backup copies the pre-change content; unrelated MCP servers / keys survive a configure pass and a backup is produced).
+
+---
+
 ## [1.2.5] — 2026-08-03
 
 ### Added — EnterpriseGuard (outbound data-loss-prevention firewall)
