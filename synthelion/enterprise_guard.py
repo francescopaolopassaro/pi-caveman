@@ -43,7 +43,13 @@ from pathlib import Path
 # Content detectors
 # ---------------------------------------------------------------------------
 
-_SCAN_CAP_BYTES = 64 * 1024
+_SCAN_CAP_BYTES = 64 * 1024  # size of one scan window (kept name for compat)
+# Overlap between consecutive windows — must be >= the longest single
+# credential a detector can match, so a secret straddling a window boundary is
+# never split across two windows and missed. The longest fixed-shape match here
+# (Azure/GCP multi-line, ADO/JDBC connection strings, a PEM header line) stays
+# well under 1 KiB.
+_SCAN_OVERLAP_BYTES = 1024
 
 # Shared with sensitive_guard.py's shapes (private keys, AWS keys, GitHub/Slack
 # tokens, generic API secret keys, Bearer headers, dotenv bulk dumps) plus new
@@ -466,19 +472,36 @@ class EnterpriseGuard:
             _record_block(result, source)
         return result
 
+    @staticmethod
+    def _scan_windows(text: str) -> "list[str]":
+        """Yield overlapping windows covering the *entire* text.
+
+        The previous implementation scanned only ``text[:64KiB]`` — a hard
+        truncation that let any credential past the first 64 KiB through
+        unscanned, a trivial exfiltration path for an outbound DLP (pad with
+        filler, append the secret). Windowing with a fixed overlap scans it all
+        while keeping each regex pass bounded.
+        """
+        n = len(text)
+        if n <= _SCAN_CAP_BYTES:
+            return [text]
+        step = _SCAN_CAP_BYTES - _SCAN_OVERLAP_BYTES
+        return [text[i:i + _SCAN_CAP_BYTES] for i in range(0, n, step)]
+
     def _check_text(self, text: str) -> GuardResult:
         if not self.enabled or not text:
             return GuardResult(blocked=False)
-        scan = text[:_SCAN_CAP_BYTES]
-        for detector in CONTENT_DETECTORS:
-            if not self.categories.get(detector.category, True):
-                continue
-            if detector.pattern.search(scan):
-                return GuardResult(
-                    blocked=True, category=detector.category, rule_name=detector.name,
-                    reason=f"Blocked: detected {detector.name} ({detector.category}) in outbound content.",
-                )
-        if self.categories.get("dotenv_bulk", True) and _has_dotenv_bulk_secrets(scan):
+        for window in self._scan_windows(text):
+            for detector in CONTENT_DETECTORS:
+                if not self.categories.get(detector.category, True):
+                    continue
+                if detector.pattern.search(window):
+                    return GuardResult(
+                        blocked=True, category=detector.category, rule_name=detector.name,
+                        reason=f"Blocked: detected {detector.name} ({detector.category}) in outbound content.",
+                    )
+        # Line-oriented, so run once over the full text rather than per window.
+        if self.categories.get("dotenv_bulk", True) and _has_dotenv_bulk_secrets(text):
             return GuardResult(
                 blocked=True, category="dotenv_bulk", rule_name="Bulk .env-style secret dump",
                 reason="Blocked: detected a bulk .env-style secret dump in outbound content.",
@@ -493,17 +516,41 @@ class EnterpriseGuard:
             _record_block(result, source)
         return result
 
+    @staticmethod
+    def _path_forms(path: str) -> "list[str]":
+        """The path spellings to match a zone glob against: the literal string
+        as given (backslash-normalized), plus its fully canonicalized real path
+        with symlinks, '..', './' and relative segments resolved.
+
+        Matching only the literal string let a symlink pointing into a protected
+        zone, or a non-canonical spelling of a path inside it, slip past a glob
+        written for the canonical location (e.g. '/tmp/link/f.pdf' or the bare
+        relative 'fatture/f.pdf' both evade '**/fatture/**'). Resolving first
+        closes that gap; the literal form is kept too so a pattern written
+        relative still matches an input that can't be resolved.
+        """
+        forms: "list[str]" = []
+        literal = path.replace("\\", "/")
+        forms.append(literal)
+        try:
+            resolved = Path(path).resolve(strict=False).as_posix()
+            if resolved not in forms:
+                forms.append(resolved)
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return forms
+
     def _check_path(self, path: str) -> GuardResult:
         if not self.enabled or not path:
             return GuardResult(blocked=False)
-        normalized = path.replace("\\", "/")
-        basename = normalized.rsplit("/", 1)[-1]
-        for pattern in self._blocked_patterns:
-            if fnmatch.fnmatch(normalized, pattern) or fnmatch.fnmatch(basename, pattern):
-                return GuardResult(
-                    blocked=True, category="blocked_path", rule_name=pattern,
-                    reason=f"Blocked: '{path}' matches a protected security-zone pattern ('{pattern}').",
-                )
+        for form in self._path_forms(path):
+            basename = form.rsplit("/", 1)[-1]
+            for pattern in self._blocked_patterns:
+                if fnmatch.fnmatch(form, pattern) or fnmatch.fnmatch(basename, pattern):
+                    return GuardResult(
+                        blocked=True, category="blocked_path", rule_name=pattern,
+                        reason=f"Blocked: '{path}' matches a protected security-zone pattern ('{pattern}').",
+                    )
         return GuardResult(blocked=False)
 
     def check_tool_call(self, tool_name: str, tool_input: "dict", source: str = "firewall-check") -> GuardResult:
