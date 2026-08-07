@@ -4,16 +4,19 @@ All notable changes to Synthelion are documented here.
 
 ---
 
-## [Unreleased]
+## [1.2.5] — 2026-08-03
+
 
 ### Fixed — EnterpriseGuard black-box hardening
 - **`check_path` now canonicalizes before matching** (`enterprise_guard.py`). The zone check matched only the literal path string, so a symlink pointing into a protected zone, or a non-canonical/relative spelling of a path inside it, evaded a glob written for the canonical location (e.g. `/tmp/link/f.pdf` and the bare relative `fatture/f.pdf` both slipped past `**/fatture/**`). Each path is now matched against both its literal form and its fully resolved real path (`Path.resolve`, symlinks / `..` / `./` / relative segments collapsed), closing the escape while keeping the literal fallback for paths that can't be resolved.
 - **`check_text` now scans the full content, not just the first 64 KiB** (`enterprise_guard.py`). The outbound-content scan truncated to `text[:64KiB]`, so any credential past that offset went out unscanned — a trivial exfiltration path (pad with filler, append the secret). Scanning now walks the whole text in overlapping 64 KiB windows (1 KiB overlap, wider than any single credential match, so a secret straddling a window edge is still caught); the line-oriented bulk-`.env` check runs once over the full text.
 - New tests: `tests/test_enterprise_guard_hardening.py` (symlink/`..`/relative zone evasion; secret past the 64 KiB cap; secret straddling a window boundary; clean-content negatives).
 
----
+### Fixed — installer settings.json safety (`install_claude.py` / `.sh` / `.ps1`)
+- **Atomic writes.** The installers wrote `~/.claude/settings.json` in place, so an interrupted or concurrent write (e.g. Claude Code writing the same file) could leave it truncated/corrupt. Each installer now stages the new content in a same-directory temp file and atomically replaces the target (`os.replace` / `mv` of a sibling temp / `Move-Item -Force`) — the only place that touched the user's most important config non-atomically, now consistent with the atomic ledger/WAF writes elsewhere.
+- **Backup before modifying.** A valid `settings.json` was only backed up when it failed to parse; a working config was rewritten with no restore point. All three installers now copy an existing config to a timestamped `settings.json.bak-<ts>` before both configure and uninstall.
+- New tests: `tests/test_install_claude.py` (atomic write leaves no temp file and overwrites cleanly; backup copies the pre-change content; unrelated MCP servers / keys survive a configure pass and a backup is produced).
 
-## [1.2.5] — 2026-08-03
 
 ### Added — EnterpriseGuard (outbound data-loss-prevention firewall)
 - **`synthelion/enterprise_guard.py`** (`EnterpriseGuard`) — a hard block-or-allow firewall, distinct from PrivacyGuard (PII, masked-and-continue) and the WAF (inbound HTTP request inspection). Covers two independent things:

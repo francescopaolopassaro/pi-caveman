@@ -44,10 +44,28 @@ function Load-Settings {
     return [PSCustomObject]@{}
 }
 
+function Backup-Settings {
+    # Copy an existing settings file to a timestamped .bak-<ts> before we modify
+    # it, so a working config always has a restore point. A failed backup must
+    # never abort the install.
+    if (Test-Path $SettingsPath) {
+        $ts = Get-Date -Format "yyyyMMdd-HHmmss"
+        $bak = "$SettingsPath.bak-$ts"
+        try {
+            Copy-Item -LiteralPath $SettingsPath -Destination $bak -Force
+            Ok "Backed up existing settings → $bak"
+        } catch { }
+    }
+}
+
 function Save-Settings($data) {
     $dir = Split-Path $SettingsPath
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-    $data | ConvertTo-Json -Depth 10 | Set-Content $SettingsPath -Encoding UTF8
+    # Write to a temp sibling then atomically replace, so an interrupted or
+    # concurrent write can never leave a truncated settings.json.
+    $tmp = "$SettingsPath.tmp-$PID"
+    $data | ConvertTo-Json -Depth 10 | Set-Content $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $SettingsPath -Force
     Ok "Saved → $SettingsPath"
 }
 
@@ -105,6 +123,7 @@ function Configure-Claude($mcpBin, $addHook) {
     Info "Settings: $SettingsPath"
 
     $s = Load-Settings
+    Backup-Settings
 
     # Ensure mcpServers exists
     if (-not (Get-Member -InputObject $s -Name "mcpServers" -MemberType NoteProperty)) {
@@ -166,6 +185,7 @@ function Remove-ClaudeConfig {
         return
     }
     $s = Load-Settings
+    Backup-Settings
 
     # Remove MCP
     if ((Get-Member -InputObject $s -Name "mcpServers" -MemberType NoteProperty) -and

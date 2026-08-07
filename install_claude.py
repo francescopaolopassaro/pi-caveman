@@ -219,9 +219,38 @@ def _load_settings(path: Path) -> dict:
     return {}
 
 
+def _backup_settings(path: Path) -> Path | None:
+    """Copy an existing settings file to a timestamped ``.bak-<ts>`` before we
+    modify it, so a user's working config always has a restore point. Returns
+    the backup path, or None if there was nothing to back up / the copy failed
+    (a failed backup must never block or crash the install)."""
+    if not path.exists():
+        return None
+    from datetime import datetime
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = path.with_name(f"{path.name}.bak-{ts}")
+    try:
+        shutil.copy2(path, backup)
+        return backup
+    except OSError:
+        return None
+
+
 def _save_settings(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    # Write to a temp file in the same directory, then atomically replace the
+    # target: an interrupted or concurrent write can never leave a truncated /
+    # corrupt settings.json (os.replace is atomic on the same filesystem).
+    tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 # ── install flow ─────────────────────────────────────────────────────────────
@@ -232,6 +261,10 @@ def configure_claude(binary: str | None, add_hook: bool) -> None:
     info(f"Settings file: {path}")
 
     settings = _load_settings(path)
+
+    backup = _backup_settings(path)
+    if backup:
+        info(f"Backed up existing settings -> {backup}")
 
     # MCP server
     settings.setdefault("mcpServers", {})
@@ -271,6 +304,10 @@ def remove_claude_config() -> None:
         warn("settings.json not found — nothing to remove.")
         return
     settings = _load_settings(path)
+
+    backup = _backup_settings(path)
+    if backup:
+        info(f"Backed up existing settings -> {backup}")
 
     # Remove MCP
     mcp = settings.get("mcpServers", {})

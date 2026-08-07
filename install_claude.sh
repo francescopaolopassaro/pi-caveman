@@ -58,10 +58,26 @@ load_settings() {
   fi
 }
 
+backup_settings() {
+  # Copy an existing settings file to a timestamped .bak-<ts> before we modify
+  # it, so a working config always has a restore point. A failed backup must
+  # never abort the install.
+  if [ -f "$SETTINGS" ]; then
+    local bak; bak="${SETTINGS}.bak-$(date +%Y%m%d-%H%M%S)"
+    if cp "$SETTINGS" "$bak" 2>/dev/null; then
+      ok "Backed up existing settings → $bak"
+    fi
+  fi
+}
+
 save_settings() {
   local data="$1"
   mkdir -p "$(dirname "$SETTINGS")"
-  echo "$data" > "$SETTINGS"
+  # Write to a temp file then atomically move it into place, so an interrupted
+  # or concurrent write can never leave a truncated settings.json.
+  local tmp; tmp="${SETTINGS}.tmp-$$"
+  printf '%s\n' "$data" > "$tmp" && mv "$tmp" "$SETTINGS"
+  rm -f "$tmp" 2>/dev/null || true
   ok "Saved → $SETTINGS"
 }
 
@@ -177,9 +193,13 @@ PYEOF
     ok "UserPromptSubmit hook configured"
   fi
 
+  backup_settings
   mkdir -p "$(dirname "$SETTINGS")"
-  cp "$tmp" "$SETTINGS"
-  rm -f "$tmp"
+  # Stage the new content as a sibling of $SETTINGS (same filesystem) then
+  # atomically rename it into place — never a partial write over the real file.
+  local final; final="${SETTINGS}.tmp-$$"
+  cp "$tmp" "$final" && mv "$final" "$SETTINGS"
+  rm -f "$tmp" "$final" 2>/dev/null || true
   ok "Saved → $SETTINGS"
 }
 
@@ -222,8 +242,10 @@ with open(path, 'w') as f:
     f.write('\n')
 PYEOF
 
-  cp "$tmp" "$SETTINGS"
-  rm -f "$tmp"
+  backup_settings
+  local final; final="${SETTINGS}.tmp-$$"
+  cp "$tmp" "$final" && mv "$final" "$SETTINGS"
+  rm -f "$tmp" "$final" 2>/dev/null || true
   ok "Saved → $SETTINGS"
 }
 
