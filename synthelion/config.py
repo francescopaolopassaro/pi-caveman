@@ -49,7 +49,10 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "port": 8787,
         # "websocket" | "polling"
         "realtime": "websocket",
-        "websocket_port": 8788,
+        # Must differ from proxy.port (8788): when both the dashboard and the
+        # proxy run as always-on services, sharing 8788 means whichever binds
+        # second fails to start. 8789 keeps them clear.
+        "websocket_port": 8789,
     },
     "privacy": {
         # Master switch — set to False to disable PII detection/masking entirely

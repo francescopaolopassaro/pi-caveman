@@ -32,6 +32,10 @@ dependencies = [
     "mcp>=1.0",
     "pyyaml>=6.0",
     "sqlparse>=0.5",
+    # Windows-only: required to register/run the native Windows service
+    # (`synthelion service install`). Installed automatically on Windows,
+    # skipped on Linux/macOS.
+    "pywin32>=306; sys_platform == 'win32'",
 ]
 
 [project.urls]

@@ -4,6 +4,26 @@ All notable changes to Synthelion are documented here.
 
 ---
 
+## [Unreleased]
+
+### Added — `synthelion service`: universal auto-starting service installer
+- One cross-OS interface — `synthelion service install | uninstall | status` — that installs the dashboard (port 8787, the control surface) and the proxy (port 8788) as always-on services which start automatically and restart on failure. Previously they ran only manually or via the Claude hook. `--proxy-only` installs just the proxy.
+- Native backend per OS, chosen automatically: **systemd** `--user` unit on Linux, **launchd** LaunchAgent on macOS, and a real **Windows Service** (pywin32, `SERVICE_AUTO_START`, SCM restart-on-crash) on Windows. The absolute executable path is baked in so services start without relying on `PATH`.
+- Windows service runs under the SCM (LocalSystem), so the installer records the user's config path in the service registry and the service exports it as `SYNTHELION_CONFIG` on startup — it reads the same config configured interactively. `pywin32` is added as a Windows-only dependency (installed automatically on Windows, skipped elsewhere). Uninstall stops and removes the services.
+- New `synthelion/win_service.py` (pywin32 SCM entry point, import-safe on non-Windows) and `synthelion/service.py`; `tests/test_service.py` covers the systemd unit, launchd plist, Windows service dispatch (both services, auto-start, restart command, admin requirement), and failure handling.
+
+---
+
+## [Unreleased]
+
+### Added — `synthelion service`: universal auto-starting service installer
+- One cross-OS interface — `synthelion service install | uninstall | status` — that registers `serve-proxy` as a native, **user-level** (no root/admin) service which starts on login and restarts on failure. Previously the proxy ran only manually or via the Claude hook.
+- Native backend per OS, chosen automatically: **systemd** `--user` unit on Linux (`~/.config/systemd/user/`), **launchd** LaunchAgent on macOS (`~/Library/LaunchAgents/`, `RunAtLoad`+`KeepAlive`), **Task Scheduler** "at logon" task on Windows (auto-restart, no admin).
+- The absolute path to the Synthelion executable is baked into each unit, so the service starts correctly at boot/login without relying on `PATH`. `--with-dashboard` also supervises `serve-dashboard`; `--dry-run` prints the actions without changing anything.
+- New `synthelion/service.py` (pure unit generators + dispatch) and `tests/test_service.py` covering the generated systemd unit, launchd plist, and Task Scheduler XML for correctness (auto-restart, start-at-login, absolute path, path/arg quoting and XML escaping).
+
+---
+
 ## [1.2.5] — 2026-08-03
 
 
