@@ -74,6 +74,28 @@ def install_package(upgrade: bool = False) -> None:
     ok(f"pip install {PACKAGE} succeeded")
 
 
+def remove_services() -> None:
+    """Remove the installed Synthelion services, if any.
+
+    Best-effort and always before the package is uninstalled — once pip removes
+    synthelion the CLI is gone and any registered systemd unit / LaunchAgent /
+    Windows service would be left orphaned, pointing at an executable that no
+    longer exists.
+    """
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "synthelion.cli", "service", "uninstall"],
+            capture_output=True,
+            text=True,
+        )
+        if r.returncode == 0:
+            ok("Services removed")
+        else:
+            warn("No services to remove (or removal needs elevation)")
+    except Exception:
+        warn("Could not remove services — remove them manually if installed")
+
+
 def uninstall_package() -> None:
     h2("Uninstalling Synthelion…")
     result = subprocess.run(
@@ -406,6 +428,7 @@ def main() -> None:
 
     if args.uninstall:
         remove_claude_config()
+        remove_services()
         uninstall_package()
         h1("Uninstall complete.")
         return

@@ -73,6 +73,17 @@ def main() -> None:
     p_proxy.add_argument("--host", default=None, help="Bind address (default: configured value, normally 127.0.0.1)")
     p_proxy.add_argument("--port", type=int, default=None, help="Port (default: configured value, normally 8788)")
 
+    # service — install serve-proxy as a native, auto-starting OS service
+    p_service = sub.add_parser(
+        "service",
+        help="Install Synthelion (serve-proxy) as a native auto-starting service (systemd/launchd/Task Scheduler)",
+    )
+    service_sub = p_service.add_subparsers(dest="service_cmd", required=True)
+    for _sc in ("install", "uninstall", "status"):
+        _p = service_sub.add_parser(_sc, help=f"{_sc} the Synthelion service")
+        _p.add_argument("--proxy-only", action="store_true", help="Install only the proxy service (default installs dashboard + proxy)")
+        _p.add_argument("--dry-run", action="store_true", help="Print what would happen without changing anything")
+
     # doctor — check installation health
     p_doctor = sub.add_parser("doctor", help="Check Synthelion installation health")
     p_doctor.add_argument("--json", action="store_true", help="Output as JSON")
@@ -280,6 +291,8 @@ def main() -> None:
         from synthelion.plugins.proxy import run_proxy
         pcfg = load_config().get("proxy", {})
         run_proxy(host=args.host or pcfg.get("host", "127.0.0.1"), port=args.port or pcfg.get("port", 8788))
+    elif args.cmd == "service":
+        _cmd_service(args)
     elif args.cmd == "status":
         _cmd_status(args)
     elif args.cmd == "gain":
@@ -1042,6 +1055,44 @@ def _print_star_cta() -> None:
     (never in --json mode, which must stay machine-parseable) — the CLI is
     often the only place a happy user ever sees Synthelion's name."""
     print("\n⭐ Enjoying Synthelion? Star us on GitHub: https://github.com/francescopaolopassaro/synthelion")
+
+
+def _cmd_service(args) -> None:
+    from synthelion import service as svc
+    specs = svc.default_specs(proxy_only=getattr(args, "proxy_only", False))
+    try:
+        backend = svc.current_backend()
+    except RuntimeError as e:
+        print(str(e))
+        raise SystemExit(1)
+
+    if args.service_cmd == "install":
+        print(f"Installing Synthelion service via {backend} (user-level)…")
+        try:
+            svc.install(specs, dry_run=args.dry_run)
+        except svc.ServiceError as e:
+            print(f"Install failed: {e}")
+            raise SystemExit(1)
+        if not args.dry_run:
+            print("Installed. It will start now and on every login.")
+            if backend == "systemd":
+                print("Tip: `loginctl enable-linger $USER` to keep it running without an active login.")
+    elif args.service_cmd == "uninstall":
+        print(f"Removing Synthelion service via {backend}…")
+        try:
+            svc.uninstall(specs, dry_run=args.dry_run)
+        except svc.ServiceError as e:
+            print(f"Uninstall failed: {e}")
+            raise SystemExit(1)
+    elif args.service_cmd == "status":
+        for spec in specs:
+            print(f"{spec.name}: backend={backend}, argv={' '.join(spec.argv)}")
+            if backend == "systemd":
+                print(f"  unit: {svc.systemd_unit_path(spec)}")
+            elif backend == "launchd":
+                print(f"  plist: {svc.launchd_plist_path(spec)}")
+            elif backend == "windows":
+                print(f"  task: {svc.windows_task_name(spec)}")
 
 
 def _cmd_doctor(args) -> None:

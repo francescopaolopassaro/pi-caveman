@@ -89,3 +89,18 @@ def test_unrelated_keys_survive_backup_and_save(tmp_path, monkeypatch):
     backups = [p for p in tmp_path.iterdir() if ".bak-" in p.name]
     assert backups, "no backup was created"
     assert any(_read(b) == existing for b in backups)
+
+
+def test_uninstall_removes_services_before_package():
+    """Services must be removed while the CLI still exists — after pip drops
+    the package, a registered unit would point at a missing executable."""
+    src = (_ROOT / "install_claude.py").read_text(encoding="utf-8")
+    body = src[src.index("if args.uninstall:"):]
+    assert "remove_services()" in body
+    assert body.index("remove_services()") < body.index("uninstall_package()")
+
+
+def test_shell_installers_remove_services_on_uninstall():
+    for name in ("install_claude.sh", "install_claude.ps1"):
+        src = (_ROOT / name).read_text(encoding="utf-8")
+        assert "service uninstall" in src, f"{name} does not remove services"

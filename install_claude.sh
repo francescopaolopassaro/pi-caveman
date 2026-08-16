@@ -274,6 +274,14 @@ echo "  Python   : $($PY --version)"
 
 if [ "$UNINSTALL" = "true" ]; then
   remove_claude_config
+  # Remove services before pip drops the package, or the registered unit would
+  # be left pointing at an executable that no longer exists.
+  h2 "Removing Synthelion services…"
+  if $PY -m synthelion.cli service uninstall >/dev/null 2>&1; then
+    ok "Services removed"
+  else
+    warn "No services to remove"
+  fi
   if [ "$NO_PIP" = "false" ]; then
     h2 "Uninstalling Synthelion…"
     $PY -m pip uninstall -y synthelion && ok "Synthelion uninstalled" || warn "Not installed via pip"

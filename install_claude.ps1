@@ -239,6 +239,11 @@ Write-Host "  Python   : $pyVer"
 
 if ($Uninstall) {
     Remove-ClaudeConfig
+    # Remove services before pip drops the package, or the registered Windows
+    # service would be left pointing at an executable that no longer exists.
+    H2 "Removing Synthelion services…"
+    python -m synthelion.cli service uninstall 2>$null
+    if ($LASTEXITCODE -eq 0) { Ok "Services removed" } else { Warn "No services to remove (or removal needs elevation)" }
     if (-not $NoPip) {
         H2 "Uninstalling Synthelion…"
         python -m pip uninstall -y synthelion
