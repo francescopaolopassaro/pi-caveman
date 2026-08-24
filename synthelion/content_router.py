@@ -6,7 +6,7 @@ import hashlib
 import time
 from threading import Lock
 
-from synthelion.compressors.code_compressor import CodeCompressor
+from synthelion.compressors.code_compressor import CodeCompressor, compress_python_ast
 from synthelion.compressors.diff_compressor import DiffCompressor
 from synthelion.compressors.html_extractor import HtmlExtractor
 from synthelion.compressors.json_crusher import JsonCrusher
@@ -26,6 +26,23 @@ from synthelion.terminal_noise import strip_ansi_noise
 
 _CACHE_TTL = 1800   # 30 minutes
 _CACHE_MAX = 512    # max entries — evict oldest 25% when full
+
+# Content whose meaning is carried by syntax that the prose compressor removes:
+# operators, delimiters, clause keywords. For these, the NLP compressor produces
+# output that reads as compressed and is in fact unusable — `price = base -
+# (base * discount)` becomes `price base base discount`, where no reader can
+# recover whether the discount was subtracted or added. If the dedicated
+# strategy declines, the correct outcome is the original content.
+#
+# Deliberately narrow. JSON is *not* included: `test_content_router_schema_
+# object_falls_back_to_nlp` codifies the NLP fallback for schema objects as
+# intended behaviour, and JSON aimed at a language model does not need to remain
+# machine-parseable. Whether that should also change is a product question about
+# who consumes the output, not one to settle here.
+_NEVER_NLP_TYPES = frozenset({
+    ContentType.CODE,
+    ContentType.SQL,
+})
 
 
 def _approx_tokens(text: str) -> int:
@@ -82,8 +99,12 @@ class ContentRouter:
         prose_level: CompressionLevel = CompressionLevel.SEMANTIC,
         max_json_items: int = 15,
         compression_service: CompressionService | None = None,
+        python_ast: bool = False,
     ) -> None:
         self._prose_level = prose_level
+        # Rebuild Python from its AST instead of only stripping comments. Off by
+        # default because it also drops docstrings and normalises formatting.
+        self.python_ast = python_ast
         self._detector = ContentDetector()
         self._nlp = compression_service or CompressionService()
         self._json = JsonCrusher(max_json_items)
@@ -210,8 +231,20 @@ class ContentRouter:
                     tokens_before=tb, tokens_after=_approx_tokens(compressed),
                     ccr_hash=r.get("ccr_hash"),
                 )
-            # Falls through to NLP compression below when nothing was crushed
-            # (e.g. a JSON-Schema-shaped object, or one too small to collapse).
+            # Nothing was crushed. Why matters: a JSON-Schema-shaped object is
+            # metadata that reads much like prose, and falling through to the
+            # prose compressor is the intended behaviour for it. A data object
+            # that merely failed to shrink is different — its values are the
+            # payload, and the prose compressor would strip the punctuation
+            # holding them together, turning "127.0.0.1" into "127 0 0 1" and
+            # lemmatising the key "roles" into "role". For that case the
+            # original is the correct output.
+            if r.get("decline_reason") == "no-gain":
+                return RoutedCompressionResult(
+                    compressed=content, original=content,
+                    detected_type=ct, strategy_used="JsonCrush→Passthrough(no-gain)",
+                    tokens_before=tb, tokens_after=tb,
+                )
 
         if ct == ContentType.GIT_DIFF:
             compressed, _ = self._diff.compress(content)
@@ -241,9 +274,19 @@ class ContentRouter:
 
         if ct == ContentType.CODE:
             compressed, lang, _, _ = self._code.compress(content)
+            strategy = f"CodeCompression:{lang}"
+            # For Python, an AST round-trip goes considerably further than the
+            # comment-stripping pass and is valid by construction. Off by
+            # default: it also drops docstrings and normalises formatting, which
+            # matters when the code is going to be read back and edited rather
+            # than only understood. See `python_ast` on the profile.
+            if self.python_ast and lang == "python":
+                rebuilt, changed = compress_python_ast(compressed)
+                if changed:
+                    compressed, strategy = rebuilt, f"{strategy}+AstRebuild"
             return RoutedCompressionResult(
                 compressed=compressed, original=content,
-                detected_type=ct, strategy_used=f"CodeCompression:{lang}",
+                detected_type=ct, strategy_used=strategy,
                 tokens_before=tb, tokens_after=_approx_tokens(compressed),
             )
 
@@ -272,7 +315,16 @@ class ContentRouter:
                 tokens_before=tb, tokens_after=_approx_tokens(compressed),
             )
 
-        # PlainText, or JsonObject that JsonCrusher couldn't collapse → NLP compression
+        # Everything that reaches here is PlainText, or a type whose own
+        # strategy declined to collapse it. PlainText goes to the NLP
+        # compressor; code and SQL must not — see _NEVER_NLP_TYPES.
+        if ct in _NEVER_NLP_TYPES:
+            return RoutedCompressionResult(
+                compressed=content, original=content,
+                detected_type=ct, strategy_used="Passthrough(structured)",
+                tokens_before=tb, tokens_after=tb,
+            )
+
         nlp_result = self._nlp.compress(content, effective_level)
         compressed = nlp_result.compressed_text
         return RoutedCompressionResult(
