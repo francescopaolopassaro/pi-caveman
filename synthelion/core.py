@@ -30,9 +30,23 @@ if TYPE_CHECKING:
 # supports \p{...} Unicode property escapes directly, exactly like the C# fix, and is a
 # compiled matcher rather than a per-character Python loop — the same correctness fix without
 # a performance regression.
+# Structured values are isolated before the generic word tokenizer. This keeps
+# internal punctuation intact even when the value is attached to CJK/no-space text.
+_PROTECTED_TOKEN = regex.compile(
+    r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+|"
+    r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+|"
+    r"(?<!\d)(?:\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:/\d{1,2})?|(?:[0-9A-Fa-f]{1,4}:){2,7}[0-9A-Fa-f]{1,4})(?!\d)|"
+    r"(?<!\d)\d{4}-\d{2}-\d{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:Z|[+-][0-9]{2}:[0-9]{2})?)?(?!\d)|"
+    r"(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{2,4}(?!\d)|"
+    r"(?<!\d)v?\d+(?:\.\d+)+(?!\d)|"
+    r"(?<!\d)[+-]?(?:\d+(?:[.,]\d+)?)(?:[eE][+-]?\d+)?(?:[%‰°])?(?!\d)",
+    regex.UNICODE,
+)
+
 _WORD_SPLIT = regex.compile(
     r"[\p{L}\p{M}\p{N}_]+(?:'[\p{L}\p{M}\p{N}_]+)?|[^\w\s]", regex.UNICODE
 )
+
 
 # Languages that capitalise all common nouns — the positional proper-noun
 # heuristic is disabled for these (same as C# CapitalizedNounLanguages).
@@ -312,7 +326,7 @@ class CompressionService:
             generic = self._provider.get_generic_words(iso3) or _GENERIC_FALLBACK
             filtered = _filter_syntactic(tokens, fw, lemmas, proper_nouns, iso3, generic, pos_tags)
 
-        compressed = " ".join(filtered)
+        compressed = _join_filtered(filtered)
         return CompressionResult(
             compressed_text=compressed,
             original_tokens=original_count,
@@ -325,28 +339,54 @@ class CompressionService:
 # ------------------------------------------------------------------
 
 class _Token:
-    __slots__ = ("text", "is_punct")
+    __slots__ = ("text", "is_punct", "protected")
 
-    def __init__(self, text: str, is_punct: bool) -> None:
+    def __init__(self, text: str, is_punct: bool, protected: bool = False) -> None:
         self.text = text
         self.is_punct = is_punct
+        self.protected = protected
 
 
 def _tokenize(text: str) -> list[_Token]:
-    tokens = []
-    for m in _WORD_SPLIT.finditer(text):
-        t = m.group()
-        is_punct = not (t[0].isalpha() or t[0].isdigit())
-        if not is_punct and len(t) > 1 and cjk_segmenter.is_han(t[0]):
-            # Chinese has no spaces between words, so the regex above matched
-            # this whole run of Han characters as one "word" -- segment it
-            # into real words instead, or every function/negation word check
-            # downstream compares against the entire sentence and never matches.
-            for word in cjk_segmenter.segment_han_run(t):
-                tokens.append(_Token(word, False))
-            continue
-        tokens.append(_Token(t, is_punct))
+    tokens: list[_Token] = []
+    cursor = 0
+
+    def append_normal(segment: str) -> None:
+        if not segment:
+            return
+        for m in _WORD_SPLIT.finditer(segment):
+            t = m.group()
+            is_punct = not (t[0].isalpha() or t[0].isdigit())
+            if not is_punct and len(t) > 1 and cjk_segmenter.is_han(t[0]):
+                for word in cjk_segmenter.segment_han_run(t):
+                    tokens.append(_Token(word, False, False))
+                continue
+            tokens.append(_Token(t, is_punct, False))
+
+    for m in _PROTECTED_TOKEN.finditer(text):
+        if m.start() > cursor:
+            append_normal(text[cursor:m.start()])
+        value = m.group()
+        # Sentence punctuation belongs to the sentence, not the protected value.
+        trailing = ""
+        while value and value[-1] in ".,!?;:":
+            trailing = value[-1] + trailing
+            value = value[:-1]
+        if value:
+            tokens.append(_Token(value, False, True))
+        if trailing:
+            append_normal(trailing)
+        cursor = m.end()
+
+    if cursor < len(text):
+        append_normal(text[cursor:])
     return tokens
+
+
+# Keep the historical output spacing. Token-count compression is computed before
+# rendering, and changing CJK spacing here can break existing downstream contracts.
+def _join_filtered(items: list[str]) -> str:
+    return " ".join(items)
 
 
 # ------------------------------------------------------------------
@@ -396,7 +436,7 @@ def _detect_proper_nouns(
 def _filter_light(tokens: list[_Token], fw: frozenset[str], iso3: str) -> list[str]:
     return [
         t.text for t in tokens
-        if not t.is_punct and (t.text.lower() not in fw or _is_negation(t.text, iso3))
+        if t.protected or (not t.is_punct and (t.text.lower() not in fw or _is_negation(t.text, iso3)))
     ]
 
 
@@ -426,6 +466,9 @@ def _filter_semantic(
     out = []
     for i, tok in enumerate(tokens):
         if tok.is_punct:
+            continue
+        if tok.protected:
+            out.append(tok.text)
             continue
         if is_proper[i]:
             out.append(tok.text)
@@ -479,6 +522,10 @@ def _filter_aggressive(
 
     for i, tok in enumerate(tokens):
         if tok.is_punct:
+            continue
+
+        if tok.protected:
+            out.append(tok.text)
             continue
 
         if is_proper[i]:
@@ -571,7 +618,7 @@ def _filter_statistical(
     keys: list[str | None] = [None] * n
 
     for i, tok in enumerate(tokens):
-        if tok.is_punct or is_proper[i] or _is_number(tok.text):
+        if tok.is_punct or tok.protected or is_proper[i] or _is_number(tok.text):
             continue
 
         keys[i] = _lemma_or_lower(tok.text, lemmas, pos_tags)
@@ -609,7 +656,7 @@ def _filter_statistical(
         scores[word] = frequency * idf
 
     if not scores:
-        return [tok.text for tok in tokens if not tok.is_punct]
+        return [tok.text for tok in tokens if not tok.is_punct and (tok.protected or tok.text)]
 
     positive_scores = sorted(
         score for score in scores.values() if score > 0
@@ -625,6 +672,11 @@ def _filter_statistical(
 
     for i, tok in enumerate(tokens):
         if tok.is_punct:
+            continue
+
+        if tok.protected:
+            keep[i] = True
+            sentence_has_keep[sentence_of[i]] = True
             continue
 
         if is_proper[i]:
@@ -686,7 +738,7 @@ def _filter_statistical(
         if not keep[i]:
             continue
 
-        if is_proper[i] or _is_number(tok.text):
+        if tok.protected or is_proper[i] or _is_number(tok.text):
             out.append(tok.text)
             continue
 
@@ -732,6 +784,8 @@ def _filter_syntactic(
     def next_survives(j: int) -> bool:
         if j >= n or tokens[j].is_punct:
             return False
+        if tokens[j].protected:
+            return True
 
         if is_proper[j]:
             return True
@@ -802,6 +856,9 @@ def _filter_syntactic(
     for i, tok in enumerate(tokens):
         if tok.is_punct or elided[i]:
             continue
+        if tok.protected:
+            keep[i] = True
+            continue
 
         if is_proper[i]:
             keep[i] = True
@@ -843,7 +900,7 @@ def _filter_syntactic(
     for i, tok in enumerate(tokens):
         if not keep[i]:
             continue
-        if is_proper[i] or is_func[i]:
+        if tok.protected or is_proper[i] or is_func[i]:
             out.append(tok.text)
             continue
         out.append(_lemma_or_lower(tok.text, lemmas, pos_tags))
