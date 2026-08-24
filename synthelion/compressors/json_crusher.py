@@ -134,11 +134,20 @@ class JsonCrusher:
             "compressed": json_text,
             "strategy": "None",
             "was_crushed": False,
+            # Why nothing was crushed. A schema object is metadata that reads
+            # much like prose, so passing it on for prose compression is
+            # reasonable; a data object that merely failed to shrink is not —
+            # its values are the payload. The router needs to tell them apart.
+            "decline_reason": None,
             "ccr_hash": None,
             "original_rows": 0,
             "kept_rows": 0,
         }
-        if not obj or _looks_like_schema_object(obj):
+        if not obj:
+            result_base["decline_reason"] = "empty"
+            return result_base
+        if _looks_like_schema_object(obj):
+            result_base["decline_reason"] = "schema"
             return result_base
 
         flat = _collapse_chains(obj)
@@ -152,6 +161,7 @@ class JsonCrusher:
                 "original_rows": 1,
                 "kept_rows": 1,
             }
+        result_base["decline_reason"] = "no-gain"
         return result_base
 
 
