@@ -182,9 +182,9 @@ directly (NLP-only, per-level).
 | Plain text IT | 200 | 131 | −34.5% |
 | JSON array (20 rows) | 609 | 326 | −46.5% |
 | Git diff (2 files) | 328 | 198 | −39.6% |
-| Python code | 273 | 151 | −44.7% |
+| Python code | 273 | 152 | −44.3% |
 | Log / stacktrace (retry burst) | 1,666 | 102 | **−93.9%** |
-| HTML page | 242 | 61 | **−74.8%** |
+| HTML page | 242 | 63 | **−74.0%** |
 | Tool-schema JSON (new in 1.2.2 — `ToolSignature`) | 315 | 106 | **−66.3%** |
 | Nested JSON object (new in 1.2.2 — `ChainCollapse`) | 32 | 24 | −25.0% |
 
