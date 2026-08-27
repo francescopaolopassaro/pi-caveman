@@ -386,7 +386,36 @@ def _tokenize(text: str) -> list[_Token]:
 # Keep the historical output spacing. Token-count compression is computed before
 # rendering, and changing CJK spacing here can break existing downstream contracts.
 def _join_filtered(items: list[str]) -> str:
-    return " ".join(items)
+    """Join surviving tokens, without inserting spaces inside CJK runs.
+
+    Chinese and Japanese are written without spaces between words, so the plain
+    `" ".join` inflated the output: a 21-character Chinese sentence came back as
+    40 characters, and the reported token saving described a string that was
+    physically longer than the input. Spaces are still needed between a CJK
+    token and a Latin one (a version number, a URL) or the boundary disappears.
+    """
+    if not items:
+        return ""
+    out = [items[0]]
+    for prev, cur in zip(items, items[1:]):
+        if _is_cjk_char(prev[-1]) and _is_cjk_char(cur[0]):
+            out.append(cur)          # no separator inside a CJK run
+        else:
+            out.append(" ")
+            out.append(cur)
+    return "".join(out)
+
+
+def _is_cjk_char(ch: str) -> bool:
+    """Han, Hiragana, Katakana — scripts written without word spacing."""
+    cp = ord(ch)
+    return (
+        0x4E00 <= cp <= 0x9FFF      # CJK Unified Ideographs
+        or 0x3400 <= cp <= 0x4DBF   # Extension A
+        or 0x3040 <= cp <= 0x309F   # Hiragana
+        or 0x30A0 <= cp <= 0x30FF   # Katakana
+        or 0xF900 <= cp <= 0xFAFF   # Compatibility Ideographs
+    )
 
 
 # ------------------------------------------------------------------

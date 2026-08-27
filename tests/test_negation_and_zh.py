@@ -102,9 +102,15 @@ class TestChineseSegmentationAndDetection:
     def test_chinese_compression_actually_segments_words(self):
         text = "我们不能接受这个方案，因为它不安全。"
         r = self.svc.compress(text, CompressionLevel.SEMANTIC, iso3="zho")
-        # more than one token in the output proves segmentation happened
-        # (the pre-fix behaviour collapsed the whole sentence into one blob).
-        assert len(r.compressed_text.split()) > 1
+        # A dropped token count proves segmentation happened (the pre-fix
+        # behaviour collapsed the whole sentence into one blob and compressed
+        # nothing). Counting whitespace in the output would not work: Chinese is
+        # written without spaces, so the renderer no longer inserts any between
+        # adjacent Han tokens — the segmentation is real, it is just not visible
+        # in the rendered string.
+        assert r.compressed_tokens < r.original_tokens
+        assert "我们" not in r.compressed_text      # function word removed
+        assert "不" in r.compressed_text            # negation preserved
 
 
 class TestDetectorDataQualityFixes:
