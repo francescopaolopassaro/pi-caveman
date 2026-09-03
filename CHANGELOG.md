@@ -6,6 +6,18 @@ All notable changes to Synthelion are documented here.
 
 ## [Unreleased]
 
+### Added — EnterpriseGuard: SSRF/metadata-egress and destructive-command blocking on `check_tool_call`
+- **No SSRF/cloud-metadata protection existed anywhere in the codebase.** A tool call's URL argument or Bash command could target `169.254.169.254` (AWS/GCP/Azure/Alibaba instance metadata), a loopback/RFC1918 address, or a dangerous non-HTTP scheme (`file://`, `gopher://`, `dict://`) and nothing would stop it.
+- **Destructive-shell patterns were advisory-only.** `SafetyGuard` already recognized `rm -rf`, `drop table`, `git push --force` and similar patterns, but only to skip compressing the text — never to block the tool call carrying them.
+- New `synthelion/ssrf_guard.py`: `find_ssrf_target(text)` — scheme-anchored (`xxx://`) regex detector for cloud-metadata endpoints, loopback, RFC1918 private ranges, and dangerous schemes. Requiring a scheme keeps it conservative: a plain-prose mention of an internal IP in a chat message never trips it.
+- `safety_guard.py` gains a public `find_destructive_command(text)`, reusing the existing pattern set for a real blocking decision instead of only the advisory compression-skip.
+- `EnterpriseGuard.check_tool_call()` — the existing `PreToolUse`-style veto — now also checks URL-shaped tool-input args (`url`, `uri`, `endpoint`, `target_url`, `webhook_url`) and the `command` string against both detectors, before falling through to the existing credential check. Scoped to tool calls only, not `check_text()`'s general outbound-content scan — a prompt that *discusses* a destructive command or an internal URL is not blocked, only a tool actually invoked with one is.
+- Two new `content_categories` toggles in `enterprise_guard` config, `ssrf_egress` and `destructive_commands`, both on by default.
+- New tests: `tests/test_ssrf_guard.py` (22 cases) plus additions to `tests/test_enterprise_guard.py` (11 cases: both detectors, category toggles, master switch).
+- **Known limitation**: `destructive_commands` currently reuses `safety_guard`'s generic shell patterns, which don't yet include IaC-specific commands (`terraform destroy`, `kubectl delete`) — documented by a test asserting current (non-)coverage rather than silently gapped.
+
+---
+
 ### Added — `synthelion service`: universal auto-starting service installer
 - One cross-OS interface — `synthelion service install | uninstall | status` — that installs the dashboard (port 8787, the control surface) and the proxy (port 8788) as always-on services which start automatically and restart on failure. Previously they ran only manually or via the Claude hook. `--proxy-only` installs just the proxy.
 - Native backend per OS, chosen automatically: **systemd** `--user` unit on Linux, **launchd** LaunchAgent on macOS, and a real **Windows Service** (pywin32, `SERVICE_AUTO_START`, SCM restart-on-crash) on Windows. The absolute executable path is baked in so services start without relying on `PATH`.

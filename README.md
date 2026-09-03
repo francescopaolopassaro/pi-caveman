@@ -466,6 +466,8 @@ A **hard block-or-allow firewall**, distinct from PrivacyGuard (PII, masked-and-
 
 - **Content scanning** — AWS/Azure/GCP credentials, PostgreSQL/MySQL/MongoDB/JDBC/ADO.NET connection strings, FTP/SFTP URLs with embedded credentials, git remote URLs with embedded credentials, PEM private key blocks, GitHub/Slack/Bearer tokens, bulk `.env`-style dumps — always **block**, never mask (unlike PII, there's no safe redacted form of a live secret).
 - **File "security zones"** — user-defined glob patterns (`**/fatture/**`, `**/payroll/*.xlsx`, `**/database.yml`, ...) an agent must never be allowed to read, enforced *before* the read happens via `synthelion firewall-check` — a `PreToolUse`-style hook you point Claude Code (or any agent hook that supports pre-tool vetoes) at. Ships with sensible defaults already blocked (`.env`, `.git/config`, SSH/PEM keys, cloud-credential files, `.npmrc`/`.pypirc`/`.netrc`, kubeconfig).
+- **SSRF / cloud-metadata egress** — a fetch/webhook URL argument or Bash command targeting a cloud metadata endpoint (`169.254.169.254`, GCP/Azure metadata hosts, ...), a loopback/RFC1918 private address, or a dangerous non-HTTP scheme (`file://`, `gopher://`, `dict://`) is vetoed the same way a blocked file path is — scoped to the tool call itself (`check_tool_call`), so a prompt that merely *discusses* an internal URL is never blocked, only a tool actually invoked with one.
+- **Destructive-shell commands** — a Bash-shaped tool call matching a destructive pattern (`rm -rf`, `drop table`, `git push --force`, ...) is blocked outright at the same `check_tool_call` gate, not just flagged advisory like `SafetyGuard`'s compression-skip.
 - **Wired into every entry point**: CLI (`compress`), the Claude Code hook (goes through the CLI, no separate wiring needed), MCP/OpenAI-function tools (`compress`, plus an advisory `check_enterprise_guard` tool), and the local reverse proxy — the same posture as PrivacyGuard's `block_on_risk`.
 - **Per-client policies (IP/MAC), because Synthelion is a shared server, not a single-user tool.** A `blocked_paths` list isn't global-only: register a client by **IP** (the proxy sees the real connecting IP per request) or **MAC** (`synthelion firewall-check` defaults to *this machine's own MAC* — the natural identity for a local CLI/hook invocation) and give it its own additional protected paths. The proxy **auto-discovers** a never-before-seen client IP on its first request and registers it **disabled** — it shows up in the dashboard for an admin to label/configure/enable, never silently trusted or silently restricted before a human looks at it. Manage clients from the dashboard's Security page or `synthelion clients list/add/update/remove`.
 - **Audit log, not a data store**: a cross-process JSONL log (visible in the dashboard, survives regardless of which process — CLI/MCP/proxy — did the blocking) records only `category`/`rule_name`/`source`/`timestamp` for every block — **never** the triggering text or path, so the log itself can never become a place a secret ends up persisted.
@@ -474,6 +476,14 @@ A **hard block-or-allow firewall**, distinct from PrivacyGuard (PII, masked-and-
 # One-off check (advisory)
 synthelion firewall-check --tool Read --args '{"file_path": "/home/user/.env"}'
 # BLOCK: Blocked: '/home/user/.env' matches a protected security-zone pattern ('*.env').
+
+# SSRF-shaped fetch target — blocked the same way
+synthelion firewall-check --tool WebFetch --args '{"url": "http://169.254.169.254/latest/meta-data/"}'
+# BLOCK: Blocked: 'url' targets an SSRF-shaped destination (cloud-metadata-endpoint).
+
+# Destructive shell command — blocked the same way
+synthelion firewall-check --tool Bash --args '{"command": "rm -rf /"}'
+# BLOCK: Blocked: command matches a destructive-shell pattern ('rm -rf').
 
 # Register a proxy client with its own extra protected paths
 synthelion clients add --label "Marketing laptop" --ip 203.0.113.7 \
@@ -504,7 +514,8 @@ Toggle/configure it in `~/.synthelion/config.json` (or the dashboard's Security 
     "enabled": true,
     "content_categories": {
       "cloud_credentials": true, "database_connections": true, "ftp_credentials": true,
-      "git_credentials": true, "private_keys": true, "api_tokens": true, "dotenv_bulk": true
+            "git_credentials": true, "private_keys": true, "api_tokens": true, "dotenv_bulk": true,
+      "ssrf_egress": true, "destructive_commands": true
     },
     "blocked_paths": [],
     "use_default_blocked_paths": true,
