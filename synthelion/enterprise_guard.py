@@ -440,6 +440,10 @@ class EnterpriseGuard:
     # Common tool-input argument names across Claude Code/MCP-style tools that
     # carry a filesystem path, checked by check_tool_call.
     _PATH_ARG_NAMES = ("file_path", "path", "notebook_path", "filePath", "target_file")
+    # Common tool-input argument names that carry a fetch/webhook destination
+    # (WebFetch-shaped tools, HTTP client tools, notification/webhook config),
+    # checked by check_tool_call against ssrf_guard.find_ssrf_target.
+    _URL_ARG_NAMES = ("url", "uri", "endpoint", "target_url", "webhook_url")
 
     def __init__(
         self, config: "dict | None" = None, *,
@@ -570,6 +574,20 @@ class EnterpriseGuard:
                     _record_block(result, source)
                     return result
 
+        if self.categories.get("ssrf_egress", True):
+            for arg_name in self._URL_ARG_NAMES:
+                value = tool_input.get(arg_name)
+                if isinstance(value, str) and value:
+                    from synthelion.ssrf_guard import find_ssrf_target
+                    target = find_ssrf_target(value)
+                    if target:
+                        result = GuardResult(
+                            blocked=True, category="ssrf_egress", rule_name=target,
+                            reason=f"Blocked: '{arg_name}' targets an SSRF-shaped destination ({target}).",
+                        )
+                        _record_block(result, source)
+                        return result
+
         command = tool_input.get("command")
         if isinstance(command, str) and command:
             normalized = command.replace("\\", "/")
@@ -589,6 +607,26 @@ class EnterpriseGuard:
                         )
                         _record_block(result, source)
                         return result
+            if self.categories.get("ssrf_egress", True):
+                from synthelion.ssrf_guard import find_ssrf_target
+                target = find_ssrf_target(command)
+                if target:
+                    result = GuardResult(
+                        blocked=True, category="ssrf_egress", rule_name=target,
+                        reason=f"Blocked: command targets an SSRF-shaped destination ({target}).",
+                    )
+                    _record_block(result, source)
+                    return result
+            if self.categories.get("destructive_commands", True):
+                from synthelion.safety_guard import find_destructive_command
+                matched = find_destructive_command(command)
+                if matched:
+                    result = GuardResult(
+                        blocked=True, category="destructive_commands", rule_name=matched,
+                        reason=f"Blocked: command matches a destructive-shell pattern ('{matched}').",
+                    )
+                    _record_block(result, source)
+                    return result
             content_result = self._check_text(command)
             if content_result.blocked:
                 _record_block(content_result, source)
@@ -602,7 +640,6 @@ class EnterpriseGuard:
                 return content_result
 
         return GuardResult(blocked=False)
-
 
 class EnterpriseGuardBlockedError(Exception):
     """Raised by enforced entry points (compress/summarize/proxy) when
