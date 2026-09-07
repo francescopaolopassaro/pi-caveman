@@ -109,7 +109,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         # Distinct from `privacy.*` (PII, masked-and-continue) — EnterpriseGuard
         # data has no safe redacted form, so it's always block-or-allow, never mask.
         "enabled": True,
-        # Per-category toggles for check_text()'s content detectors.
+                # Per-category toggles for check_text()'s content detectors.
         "content_categories": {
             "cloud_credentials": True,
             "database_connections": True,
@@ -118,6 +118,16 @@ _DEFAULT_CONFIG: dict[str, Any] = {
             "private_keys": True,
             "api_tokens": True,
             "dotenv_bulk": True,
+            # Checked only by check_tool_call() (PreToolUse), not check_text():
+            # SSRF-shaped fetch/webhook URL args and command strings (loopback,
+            # RFC1918 ranges, cloud metadata endpoints, file/gopher/dict schemes
+            # — see ssrf_guard.py), and destructive-shell command strings (rm -rf,
+            # drop table, terraform destroy-shaped patterns — see safety_guard.py).
+            # Scoped to tool calls, not general outbound text, so a prompt that
+            # merely *discusses* an internal URL or a destructive command isn't
+            # blocked — only a tool actually being invoked with one is.
+            "ssrf_egress": True,
+            "destructive_commands": True,
         },
         # User-defined fnmatch-style glob patterns (e.g. "**/fatture/**",
         # "**/payroll/*.xlsx") — file paths an agent must never be allowed to

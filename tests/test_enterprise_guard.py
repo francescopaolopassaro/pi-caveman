@@ -190,7 +190,60 @@ class TestToolCallChecking:
     def test_master_switch_disables_tool_call_check(self):
         result = _guard(enabled=False).check_tool_call("Read", {"file_path": "/home/user/.ssh/id_rsa"})
         assert result.blocked is False
+class TestSsrfAndDestructiveCommandBlocking:
+    def test_url_arg_targeting_cloud_metadata_blocked(self):
+        result = _guard().check_tool_call("WebFetch", {"url": "http://169.254.169.254/latest/meta-data/"})
+        assert result.blocked is True
+        assert result.category == "ssrf_egress"
 
+    def test_url_arg_targeting_loopback_blocked(self):
+        result = _guard().check_tool_call("WebFetch", {"url": "http://127.0.0.1:8080/admin"})
+        assert result.blocked is True
+        assert result.category == "ssrf_egress"
+
+    def test_url_arg_targeting_private_range_blocked(self):
+        result = _guard().check_tool_call("HttpRequest", {"endpoint": "http://192.168.1.1/config"})
+        assert result.blocked is True
+        assert result.category == "ssrf_egress"
+
+    def test_url_arg_ordinary_public_url_allowed(self):
+        result = _guard().check_tool_call("WebFetch", {"url": "https://example.com/article"})
+        assert result.blocked is False
+
+    def test_bash_command_targeting_metadata_endpoint_blocked(self):
+        result = _guard().check_tool_call("Bash", {"command": "curl http://169.254.169.254/latest/meta-data/iam/security-credentials/"})
+        assert result.blocked is True
+        assert result.category == "ssrf_egress"
+
+    def test_bash_command_dangerous_scheme_blocked(self):
+        result = _guard().check_tool_call("Bash", {"command": "curl gopher://internal-service:70/"})
+        assert result.blocked is True
+        assert result.category == "ssrf_egress"
+
+    def test_bash_destructive_command_blocked(self):
+        result = _guard().check_tool_call("Bash", {"command": "rm -rf /"})
+        assert result.blocked is True
+        assert result.category == "destructive_commands"
+
+    def test_bash_terraform_destroy_shaped_not_yet_a_default_pattern(self):
+        result = _guard().check_tool_call("Bash", {"command": "terraform destroy -auto-approve"})
+        assert result.blocked is False
+
+    def test_ssrf_category_toggle_off_allows_metadata_url(self):
+        result = _guard(content_categories={"ssrf_egress": False}).check_tool_call(
+            "WebFetch", {"url": "http://169.254.169.254/"}
+        )
+        assert result.blocked is False
+
+    def test_destructive_commands_toggle_off_allows_rm_rf(self):
+        result = _guard(content_categories={"destructive_commands": False}).check_tool_call(
+            "Bash", {"command": "rm -rf /tmp/build"}
+        )
+        assert result.blocked is False
+
+    def test_master_switch_disables_ssrf_check(self):
+        result = _guard(enabled=False).check_tool_call("WebFetch", {"url": "http://169.254.169.254/"})
+        assert result.blocked is False
 
 class TestGuardResultAndError:
     def test_default_guard_result_not_blocked(self):

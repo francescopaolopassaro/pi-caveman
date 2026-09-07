@@ -65,6 +65,18 @@ _DESTRUCTIVE_MATCHERS = _build(_DESTRUCTIVE_PATTERNS)
 _WARNING_MATCHERS = _build(_WARNING_PATTERNS)
 
 
+def find_destructive_command(text: str) -> str | None:
+    """Scans *text* for a destructive-shell pattern (rm -rf, drop table,
+    git push --force, ...). Returns the matched pattern, or None.
+
+    Public, reusable entry point for callers that need a *blocking* decision
+    (e.g. `enterprise_guard.EnterpriseGuard.check_tool_call`'s PreToolUse
+    veto) — separate from `SafetyGuard.check`, which only ever produces an
+    advisory verdict (skip compression), never a block."""
+    if not text or not text.strip():
+        return None
+    return _first_match(_DESTRUCTIVE_MATCHERS, text)
+
 class SafetyLevel(Enum):
     NORMAL = "Normal"
     WARNING = "Warning"
